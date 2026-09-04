@@ -219,3 +219,89 @@ test('a handler-error listener registered by an adapter fires alongside the opti
     await s.close()
   }
 })
+
+test('a rejected async handler is reported without becoming an unhandled rejection', async () => {
+  const s = await boot()
+  const failures = []
+  const client = createClient({
+    url: s.url,
+    debounceMs: 20,
+    initialCursor: s.hub.cursor(),
+    onHandlerError: (error, meta) => failures.push({ error, meta }),
+  })
+  try {
+    client.subscribe('t', async () => {
+      throw new Error('async fold failed')
+    })
+    await until(() => client.state === 'open', 2000, 'open')
+    await s.hub.publish('t', { n: 1 })
+    await until(() => failures.length === 1, 2000, 'async handler failure')
+
+    assert.equal(failures[0].error.message, 'async fold failed')
+    assert.equal(failures[0].meta.topic, 't')
+    assert.equal(client.cursor, failures[0].meta.id, 'the async failure names the spent event')
+    assert.equal(client.state, 'open', 'a rejected handler does not tear down the stream')
+  } finally {
+    client.close()
+    await s.close()
+  }
+})
+
+test('a throwing handler-error option cannot suppress registered recovery listeners', async () => {
+  const s = await boot()
+  const recovered = []
+  const errors = []
+  const client = createClient({
+    url: s.url,
+    debounceMs: 20,
+    initialCursor: s.hub.cursor(),
+    onHandlerError: () => {
+      throw new Error('observer failed')
+    },
+    onError: (error) => errors.push(error.message),
+  })
+  client.onHandlerError((_error, meta) => recovered.push(meta.topic))
+  try {
+    client.subscribe('t', () => {
+      throw new Error('handler failed')
+    })
+    await until(() => client.state === 'open', 2000, 'open')
+    await s.hub.publish('t', { n: 1 })
+    await until(() => recovered.length === 1, 2000, 'recovery listener')
+
+    assert.deepEqual(recovered, ['t'])
+    assert.deepEqual(errors, ['observer failed', 'handler failed'])
+    assert.equal(client.state, 'open')
+  } finally {
+    client.close()
+    await s.close()
+  }
+})
+
+test('a throwing cutover option cannot consume the signal before adapter listeners run', async () => {
+  const s = await boot()
+  const recovered = []
+  const client = createClient({
+    url: s.url,
+    debounceMs: 20,
+    initialCursor: s.hub.cursor(),
+    onCutover: () => {
+      throw new Error('observer failed')
+    },
+  })
+  client.onCutover((topics) => recovered.push([...topics]))
+  try {
+    client.subscribe('a', () => {})
+    await until(() => client.state === 'open', 2000, 'open')
+    const published = await s.hub.publish('a', { n: 1 })
+    await until(() => client.cursor === published.id, 2000, 'cursor advance')
+    client.subscribe('b', () => {})
+    await until(() => recovered.length === 1, 2000, 'cutover recovery listener')
+
+    assert.deepEqual(recovered, [['b']])
+    assert.equal(client.state, 'open')
+  } finally {
+    client.close()
+    await s.close()
+  }
+})

@@ -1,6 +1,6 @@
 {
   "name": "@aghoz/react",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "React hooks for Aghoz edge event streams — useTopic, useTopicReducer and a provider that reports replay gaps. Replaces refetchInterval polling.",
   "keywords": [
     "server-sent-events",

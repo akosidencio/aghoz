@@ -40,6 +40,31 @@ test('a committed write reaches a subscriber through the outbox', async (t) => {
   }
   assert.ok(cursor, `server did not start\n${log}`)
 
+  const malformed = await fetch(`${BASE}/api/orders`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{',
+  })
+  assert.equal(malformed.status, 400, 'bad JSON is a request error, not a process crash')
+
+  const oversized = await fetch(`${BASE}/api/orders`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'x'.repeat(1_000_000), cents: 1 }),
+  })
+  assert.equal(oversized.status, 413, 'oversized bodies are rejected without being retained')
+
+  const poisoned = await fetch(`${BASE}/api/orders`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-origin': 'x'.repeat(65) },
+    body: JSON.stringify({ title: 'must not commit', cents: 1 }),
+  })
+  assert.equal(poisoned.status, 400, 'an origin the hub will reject never enters the outbox')
+
+  const afterRejections = await fetch(`${BASE}/api/orders`)
+  assert.equal(afterRejections.status, 200, 'the server remains alive after rejected input')
+  assert.deepEqual(await afterRejections.json(), [], 'the poisoned mutation rolled back entirely')
+
   // §5 — the stream opens from the cursor the data was read at, so the order placed
   // below cannot slip through the gap between the two.
   const stream = await fetch(`${BASE}/events?topics=orders&last_event_id=${cursor}`, {

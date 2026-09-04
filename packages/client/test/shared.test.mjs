@@ -747,3 +747,30 @@ test('a handler that throws in one tab is reported with its topic, in that tab o
     await s.close()
   }
 })
+
+test('a handler that rejects in one tab is reported with its topic, in that tab only', async () => {
+  const s = await boot()
+  const { tabs, closeAll } = openTabs(2, s.url, {
+    client: { initialCursor: s.hub.cursor() },
+  })
+  try {
+    const failures = [[], []]
+    tabs.forEach((tab, i) => tab.onHandlerError((_error, meta) => failures[i].push(meta.topic)))
+
+    const ok = []
+    tabs[0].subscribe('t', async () => {
+      throw new Error('async fold failed')
+    })
+    tabs[1].subscribe('t', (data) => ok.push(data))
+    await until(() => tabs.some((t) => t.state === 'open'), 3000, 'open')
+
+    await s.hub.publish('t', { n: 1 })
+    await until(() => failures[0].length === 1 && ok.length === 1, 3000, 'delivery')
+
+    assert.deepEqual(failures[0], ['t'])
+    assert.deepEqual(failures[1], [])
+  } finally {
+    closeAll()
+    await s.close()
+  }
+})

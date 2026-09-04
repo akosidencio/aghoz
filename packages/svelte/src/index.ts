@@ -221,14 +221,14 @@ export function topicReducer<S, T = unknown>(
  */
 export function topicEffect<T = unknown>(
   name: string,
-  fn: (value: T, meta: EventMeta) => void,
+  fn: (value: T, meta: EventMeta) => void | Promise<void>,
   options?: TopicOptions<T>,
 ): () => void {
   const client = getAghozClient(options?.client)
   const parse = parser(options)
 
   return client.subscribe(name, (raw, meta) => {
-    fn(parse(raw), meta)
+    return fn(parse(raw), meta)
   })
 }
 

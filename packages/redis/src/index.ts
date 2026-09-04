@@ -183,15 +183,6 @@ export async function createRedisBackplane(
     options.key ?? (options.scope === undefined ? 'aghoz:events' : `aghoz:${options.scope}:events`)
   const floorKey = `${key}:floor`
 
-  const inUse = keysInUse.get(key) ?? 0
-  if (inUse > 0) {
-    console.warn(
-      `aghoz: a second backplane on stream key "${key}" in this process. Both hubs will ` +
-        'receive every event on it, so two feed scopes sharing a key are not separated ' +
-        '(PROTOCOL.md §2.4). Give each scope its own scope or key.',
-    )
-  }
-  keysInUse.set(key, inUse + 1)
   const maxLen = options.maxLen ?? 10_000
   const blockMs = options.blockMs ?? 5_000
   const maxReplay = options.maxReplay ?? 1_000
@@ -322,11 +313,23 @@ export async function createRedisBackplane(
     }
   }
 
-  void loop()
-
   // A stream that already exists gets its floor recorded now, off the publish path, and
   // recorded as `adopted`: entries may have been evicted before this process ever looked.
   await writeFloor().catch(onError)
+
+  // Register only after every fallible initialization step. If construction rejects,
+  // there is no backplane for the caller to close and therefore no later opportunity to
+  // release this process-local diagnostic entry.
+  const inUse = keysInUse.get(key) ?? 0
+  if (inUse > 0) {
+    console.warn(
+      `aghoz: a second backplane on stream key "${key}" in this process. Both hubs will ` +
+        'receive every event on it, so two feed scopes sharing a key are not separated ' +
+        '(PROTOCOL.md §2.4). Give each scope its own scope or key.',
+    )
+  }
+  keysInUse.set(key, inUse + 1)
+  void loop()
 
   return {
     async publish(topic, payload, origin) {

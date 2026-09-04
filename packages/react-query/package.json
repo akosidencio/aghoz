@@ -1,6 +1,6 @@
 {
   "name": "@aghoz/react-query",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "TanStack Query adapter for aghoz — map edge-stream topics and replay gaps onto query invalidation while the ordinary API remains authoritative.",
   "keywords": [
     "server-sent-events",

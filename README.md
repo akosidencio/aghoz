@@ -724,8 +724,9 @@ render pass share the bootstrap cursor and are never reported. PROTOCOL.md §9.3
 
 **Received is not processed.** The client advances its cursor before invoking handlers so
 one broken component cannot block or replay the whole shared stream — which means an
-event whose handler threw is never delivered again. `onHandlerError(error, meta)` reports
-it with the topic and id, alongside the plain `onError`. Invalidation handlers recover
+event whose handler threw or rejected is never delivered again.
+`onHandlerError(error, meta)` reports it with the topic and id, alongside the plain
+`onError`. Invalidation handlers recover
 naturally by fetching authoritative state; `@aghoz/react-query`'s folding hook
 invalidates on a failed parse or update and re-throws so the failure is still reported.
 A fold of your own should do the same. PROTOCOL.md §9.2.

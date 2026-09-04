@@ -26,7 +26,7 @@ export interface EventMeta {
   readonly origin?: string
 }
 
-export type Handler = (data: string, meta: EventMeta) => void
+export type Handler = (data: string, meta: EventMeta) => void | Promise<void>
 
 /**
  * §9.3 — topics whose replacement stream just opened without a baseline.
@@ -37,8 +37,8 @@ export type Handler = (data: string, meta: EventMeta) => void
 export type CutoverListener = (topics: readonly string[], cursor: string | undefined) => void
 
 /**
- * §9.2 — a subscriber callback threw, after the cursor had already advanced past the
- * event that fed it.
+ * §9.2 — a subscriber callback threw or rejected, after the cursor had already advanced
+ * past the event that fed it.
  */
 export type HandlerErrorListener = (error: unknown, meta: EventMeta) => void
 
@@ -76,9 +76,9 @@ export interface ClientOptions {
    */
   onCutover?: CutoverListener
   /**
-   * §9.2 — a handler threw. The cursor has already advanced past that event and will
-   * not replay it, so state folded from payloads is now behind by one event with
-   * nothing else to report it.
+   * §9.2 — a handler threw or rejected. The cursor has already advanced past that
+   * event and will not replay it, so state folded from payloads is now behind by one
+   * event with nothing else to report it.
    *
    * Also reached by a parse failure inside an adapter's handler, which is the common
    * case. Invalidate the affected topic here; `onError` is the same failure without
@@ -267,7 +267,7 @@ export class Client {
   /**
    * §9.2 — registers a handler-failure listener. Returns its unsubscribe function.
    *
-   * The cursor advances before handlers run, on purpose: one throwing component must
+   * The cursor advances before handlers run, on purpose: one failing component must
    * not stall every topic multiplexed onto the connection. The consequence is that a
    * failed handler is a *silently* stale projection — the event will not come round
    * again — so anything folding payloads into state needs this signal to invalidate
@@ -335,15 +335,9 @@ export class Client {
   #setState(state: ClientState): void {
     if (this.#state === state) return
     this.#state = state
-    this.#options.onStateChange(state)
+    this.#notify(this.#options.onStateChange, state)
     for (const listener of [...this.#stateListeners]) {
-      try {
-        listener(state)
-      } catch (error) {
-        // A listener that throws must not stop the others, and must not surface as an
-        // unhandled rejection out of the read loop.
-        this.#options.onError(error)
-      }
+      this.#notify(listener, state)
     }
   }
 
@@ -401,13 +395,9 @@ export class Client {
         // purpose. The application must see it once.
         if (gapFired) return
         gapFired = true
-        this.#options.onGap(reason, topics)
+        this.#notify(this.#options.onGap, reason, topics)
         for (const listener of [...this.#gapListeners]) {
-          try {
-            listener(reason, topics)
-          } catch (error) {
-            this.#options.onError(error)
-          }
+          this.#notify(listener, reason, topics)
         }
       }
 
@@ -423,7 +413,7 @@ export class Client {
             // your own server. Recovery is explicit: `reconnect()`, once the
             // application has done something about it — logged back in, usually.
             this.#fatal = true
-            this.#options.onError(
+            this.#reportError(
               new Error(`aghoz: stream rejected with ${res.status}`),
             )
             this.#setState('closed')
@@ -454,7 +444,7 @@ export class Client {
         await this.#read(res, reportGap, topics)
       } catch (error) {
         if (controller.signal.aborted || this.#closed) return
-        this.#options.onError(error)
+        this.#reportError(error)
       }
 
       if (this.#closed || this.#openTopicsKey !== key) return
@@ -537,7 +527,12 @@ export class Client {
           }
           for (const handler of [...set]) {
             try {
-              handler(event.data, meta)
+              const pending = handler(event.data, meta)
+              if (pending !== undefined) {
+                void Promise.resolve(pending).catch((error: unknown) => {
+                  this.#reportHandlerError(error, meta)
+                })
+              }
             } catch (error) {
               // One misbehaving component must not tear down the shared connection —
               // but the cursor is already past this event, so whoever folds payloads
@@ -555,29 +550,46 @@ export class Client {
 
   /** Fans a cutover out to the option and every registered listener. */
   #reportCutover(topics: readonly string[]): void {
-    this.#options.onCutover(topics, this.#cursor)
+    this.#notify(this.#options.onCutover, topics, this.#cursor)
     for (const listener of [...this.#cutoverListeners]) {
-      try {
-        listener(topics, this.#cursor)
-      } catch (error) {
-        this.#options.onError(error)
-      }
+      this.#notify(listener, topics, this.#cursor)
     }
   }
 
   /** Fans a handler failure out to the option, every listener, and `onError`. */
   #reportHandlerError(error: unknown, meta: EventMeta): void {
-    this.#options.onHandlerError(error, meta)
+    this.#notify(this.#options.onHandlerError, error, meta)
     for (const listener of [...this.#handlerErrorListeners]) {
-      try {
-        listener(error, meta)
-      } catch (listenerError) {
-        this.#options.onError(listenerError)
-      }
+      this.#notify(listener, error, meta)
     }
     // Still reported as a plain error, so existing logging keeps working and adopting
     // the topic-scoped signal is not a condition of seeing the failure at all.
-    this.#options.onError(error)
+    this.#reportError(error)
+  }
+
+  /**
+   * Runs one observer without allowing either a throw or a rejected promise to interrupt
+   * transport bookkeeping or prevent the remaining observers from running.
+   */
+  #notify<Args extends unknown[]>(listener: (...args: Args) => unknown, ...args: Args): void {
+    try {
+      const pending = listener(...args)
+      if (pending !== undefined) {
+        void Promise.resolve(pending).catch((error: unknown) => this.#reportError(error))
+      }
+    } catch (error) {
+      this.#reportError(error)
+    }
+  }
+
+  /** `onError` is the end of the reporting chain, so its own failure is contained. */
+  #reportError(error: unknown): void {
+    try {
+      const pending = this.#options.onError(error) as unknown
+      if (pending !== undefined) void Promise.resolve(pending).catch(() => {})
+    } catch {
+      // There is nowhere further to report an error reporter failing.
+    }
   }
 
   #control(
@@ -597,7 +609,7 @@ export class Client {
       const reason: GapReason = parsed.reason === 'slow-consumer' ? 'slow-consumer' : 'history-truncated'
       reportGap(reason, parsed.topics ?? topics)
     } else if (name === '~denied') {
-      this.#options.onDenied(parsed.topics ?? [])
+      this.#notify(this.#options.onDenied, parsed.topics ?? [])
     }
     // §11 — any other `~` frame is ignored, which is what lets new ones be added.
   }

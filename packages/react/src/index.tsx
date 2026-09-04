@@ -54,7 +54,7 @@ export interface AghozProviderProps {
    */
   onCutover?: CutoverListener
   /**
-   * §9.2 — a subscriber callback threw, cursor already past the event.
+   * §9.2 — a subscriber callback threw or rejected, cursor already past the event.
    *
    * `useTopic` and `useTopicReducer` reach this through a parse failure. State folded
    * from payloads is now behind with nothing else to say so, so treat it the way you
@@ -187,7 +187,7 @@ export function useTopic<T>(topic: string, initial: T, options?: TopicOptions<T>
 /** Subscribes without holding state — for toasts, invalidation, imperative work. */
 export function useTopicEffect<T = unknown>(
   topic: string,
-  fn: (value: T, meta: EventMeta) => void,
+  fn: (value: T, meta: EventMeta) => void | Promise<void>,
   options?: TopicOptions<T>,
 ): void {
   const client = useAghoz()
@@ -199,7 +199,7 @@ export function useTopicEffect<T = unknown>(
 
   useEffect(() => {
     return client.subscribe(topic, (raw, meta) => {
-      handler.current(parse(raw), meta)
+      return handler.current(parse(raw), meta)
     })
   }, [client, topic, parse])
 }

@@ -111,7 +111,7 @@ export interface SharedClientOptions {
    * refetch, on a topic somebody in this browser just started watching.
    */
   onCutover?: CutoverListener
-  /** §9.2 — a handler in *this* tab threw after the cursor had advanced past it. */
+  /** §9.2 — a handler in *this* tab threw or rejected after the cursor had advanced. */
   onHandlerError?: HandlerErrorListener
   onError?: (error: unknown) => void
   onStateChange?: (state: ClientState) => void
@@ -370,9 +370,9 @@ export class SharedClient implements AghozClient {
       },
       onDenied: (topics) => {
         this.#send({ t: 'denied', topics: [...topics] })
-        this.#options.onDenied?.(topics)
+        if (this.#options.onDenied !== undefined) this.#notify(this.#options.onDenied, topics)
       },
-      onError: (error) => this.#options.onError?.(error),
+      onError: (error) => this.#reportError(error),
       onStateChange: (state) => {
         const rejected = this.#leader?.rejected ?? false
         this.#send({ t: 'state', state, rejected })
@@ -496,7 +496,7 @@ export class SharedClient implements AghozClient {
         this.#fireCutover(message.topics, message.cursor)
         return
       case 'denied':
-        this.#options.onDenied?.(message.topics)
+        if (this.#options.onDenied !== undefined) this.#notify(this.#options.onDenied, message.topics)
         return
       default:
         return
@@ -509,7 +509,7 @@ export class SharedClient implements AghozClient {
     } catch (error) {
       // A closed channel during teardown, or a structured-clone failure. Neither should
       // take the tab's own delivery down with it.
-      this.#options.onError?.(error)
+      this.#reportError(error)
     }
   }
 
@@ -557,7 +557,12 @@ export class SharedClient implements AghozClient {
     const meta = { id, topic, ...(origin !== undefined && { origin }) }
     for (const handler of [...set]) {
       try {
-        handler(data, meta)
+        const pending = handler(data, meta)
+        if (pending !== undefined) {
+          void Promise.resolve(pending).catch((error: unknown) => {
+            this.#fireHandlerError(error, meta)
+          })
+        }
       } catch (error) {
         // §9.2 — the cursor above has already moved past this event and no reconnect
         // will bring it back, so the failure has to name the topic it belongs to.
@@ -571,49 +576,57 @@ export class SharedClient implements AghozClient {
   }
 
   #fireGap(reason: GapReason, topics: readonly string[]): void {
-    this.#options.onGap?.(reason, topics)
+    if (this.#options.onGap !== undefined) this.#notify(this.#options.onGap, reason, topics)
     for (const listener of [...this.#gapListeners]) {
-      try {
-        listener(reason, topics)
-      } catch (error) {
-        this.#options.onError?.(error)
-      }
+      this.#notify(listener, reason, topics)
     }
   }
 
   #fireCutover(topics: readonly string[], cursor: string | undefined): void {
-    this.#options.onCutover?.(topics, cursor)
+    if (this.#options.onCutover !== undefined) this.#notify(this.#options.onCutover, topics, cursor)
     for (const listener of [...this.#cutoverListeners]) {
-      try {
-        listener(topics, cursor)
-      } catch (error) {
-        this.#options.onError?.(error)
-      }
+      this.#notify(listener, topics, cursor)
     }
   }
 
   #fireHandlerError(error: unknown, meta: EventMeta): void {
-    this.#options.onHandlerError?.(error, meta)
-    for (const listener of [...this.#handlerErrorListeners]) {
-      try {
-        listener(error, meta)
-      } catch (listenerError) {
-        this.#options.onError?.(listenerError)
-      }
+    if (this.#options.onHandlerError !== undefined) {
+      this.#notify(this.#options.onHandlerError, error, meta)
     }
-    this.#options.onError?.(error)
+    for (const listener of [...this.#handlerErrorListeners]) {
+      this.#notify(listener, error, meta)
+    }
+    this.#reportError(error)
   }
 
   #setState(state: ClientState): void {
     if (this.#state === state) return
     this.#state = state
-    this.#options.onStateChange?.(state)
+    if (this.#options.onStateChange !== undefined) this.#notify(this.#options.onStateChange, state)
     for (const listener of [...this.#stateListeners]) {
-      try {
-        listener(state)
-      } catch (error) {
-        this.#options.onError?.(error)
+      this.#notify(listener, state)
+    }
+  }
+
+  /** Runs observers independently and contains both throws and rejected promises. */
+  #notify<Args extends unknown[]>(listener: (...args: Args) => unknown, ...args: Args): void {
+    try {
+      const pending = listener(...args)
+      if (pending !== undefined) {
+        void Promise.resolve(pending).catch((error: unknown) => this.#reportError(error))
       }
+    } catch (error) {
+      this.#reportError(error)
+    }
+  }
+
+  /** `onError` cannot safely report its own failure, so it is the contained endpoint. */
+  #reportError(error: unknown): void {
+    try {
+      const pending = this.#options.onError?.(error) as unknown
+      if (pending !== undefined) void Promise.resolve(pending).catch(() => {})
+    } catch {
+      // There is nowhere further to report an error reporter failing.
     }
   }
 }

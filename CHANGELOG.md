@@ -4,14 +4,14 @@ All packages ship in lockstep — the conformance guarantee only holds if the pa
 sharing the corpus share a version. Reasoning for anything significant lives in
 [DECISIONS.md](./DECISIONS.md).
 
-## 0.4.3 — 2026-09-04
+## 0.5.0 — 2026-09-04
 
 ### Added
 
 - `Client.onCutover` / `SharedClient.onCutover` — the topics whose stream reopened
   without a baseline, reported after it is open (PROTOCOL.md §9.3, D19).
-- `Client.onHandlerError` — a handler that threw, with its topic and id, after the
-  cursor had already advanced past it (§9.2, D21).
+- `Client.onHandlerError` — a handler that threw or rejected, with its topic and id,
+  after the cursor had already advanced past it (§9.2, D21).
 - `onCutover` and `onHandlerError` options on `@aghoz/react`, `@aghoz/vue`,
   `@aghoz/svelte`.
 - `@aghoz/redis`: `scope`, one sequence and retention budget per tenant (§2.4, D22).
@@ -35,10 +35,15 @@ sharing the corpus share a version. Reasoning for anything significant lives in
 - Subscriber ids no longer truncate to `u32` crossing into Node (D18).
 - `~denied` frames could be made unparseable by a topic containing a raw LF (D18).
 
-### Note
+### Breaking changes
 
 `AghozClient` gained two members. Implementing that interface yourself is a compile
 error until you add them; using the shipped clients is unaffected.
+
+Rust callers must construct `EventId` with `EventId::new` and read it through `ms()` and
+`seq()`, handle `PublishError::IdOutOfRange`, and call pointer-taking `aghoz-abi` exports
+inside `unsafe`. The C symbols and C header declarations are unchanged. These source-level
+changes are why this release is 0.5.0 rather than the originally planned 0.4.3.
 
 ## 0.4.2 — 2026-08-18
 

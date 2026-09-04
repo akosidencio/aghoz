@@ -37,6 +37,41 @@ const reachable = await (async () => {
 
 const options = () => ({ skip: reachable ? false : `no redis on :${PORT}` })
 
+test('failed construction does not leave a false duplicate-key warning behind', async () => {
+  const key = `aghoz:failed-construction:${process.pid}`
+  const failed = {
+    xadd: async () => null,
+    xrange: async () => [],
+    xrevrange: async () => {
+      throw new Error('redis unavailable')
+    },
+    xread: async () => null,
+  }
+  await assert.rejects(
+    createRedisBackplane({ redis: failed, subscriber: failed, key }),
+    /redis unavailable/,
+  )
+
+  const pending = new Promise(() => {})
+  const idle = {
+    xadd: async () => '1-0',
+    xrange: async () => [],
+    xrevrange: async () => [],
+    xread: async () => pending,
+  }
+  const warnings = []
+  const original = console.warn
+  console.warn = (message) => warnings.push(String(message))
+  let backplane
+  try {
+    backplane = await createRedisBackplane({ redis: idle, subscriber: idle, key })
+    assert.deepEqual(warnings, [], 'the rejected construction never held the key')
+  } finally {
+    console.warn = original
+    await backplane?.close()
+  }
+})
+
 const clients = []
 function client() {
   const c = new Redis({ port: PORT, maxRetriesPerRequest: null })

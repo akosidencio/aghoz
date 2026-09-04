@@ -146,7 +146,7 @@ export interface TopicOptions<T> {
 function subscribe(
   client: Client,
   topic: MaybeRefOrGetter<string>,
-  handler: (raw: string, meta: EventMeta) => void,
+  handler: (raw: string, meta: EventMeta) => void | Promise<void>,
 ): () => void {
   return watch(
     () => toValue(topic),
@@ -188,14 +188,14 @@ export function useTopic<T>(
 /** Subscribes without holding state — for toasts, invalidation, imperative work. */
 export function useTopicEffect<T = unknown>(
   topic: MaybeRefOrGetter<string>,
-  fn: (value: T, meta: EventMeta) => void,
+  fn: (value: T, meta: EventMeta) => void | Promise<void>,
   options?: TopicOptions<T>,
 ): void {
   const client = useAghoz(options?.client)
   const parse = options?.parse ?? ((raw: string) => JSON.parse(raw) as T)
 
   subscribe(client, topic, (raw, meta) => {
-    fn(parse(raw), meta)
+    return fn(parse(raw), meta)
   })
 }
 

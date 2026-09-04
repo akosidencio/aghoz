@@ -4,21 +4,21 @@ version = 4
 
 [[package]]
 name = "aghoz-abi"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "aghoz-core",
 ]
 
 [[package]]
 name = "aghoz-core"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "aghoz-node"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "aghoz-core",
  "napi",

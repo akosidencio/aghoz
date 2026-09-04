@@ -1,6 +1,6 @@
 {
   "name": "@aghoz/svelte",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Svelte client for Aghoz — stores for resumable edge event streams with explicit replay gaps.",
   "keywords": [
     "server-sent-events",

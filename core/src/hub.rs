@@ -81,9 +81,9 @@ pub enum SubscribeError {
 
 /// Why a publish was refused.
 ///
-/// Both variants are caller errors rather than request failures: a topic and an origin
-/// are supplied by application code, not parsed off the wire, so a binding surfaces these
-/// as a thrown error rather than a status code.
+/// Topic and origin variants are caller errors rather than request failures: both values
+/// are supplied by application code, not parsed off the wire, so a binding surfaces them
+/// as thrown errors rather than status codes. `IdOutOfRange` is a host/configuration fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishError {
     /// A topic violated §3.
