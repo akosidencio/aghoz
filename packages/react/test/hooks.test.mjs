@@ -133,6 +133,24 @@ test('useTopicEffect fires without holding state', async () => {
   cleanup()
 })
 
+test('useTopicEffect forwards rejected async work to onHandlerError', async () => {
+  const failures = []
+  function Toaster() {
+    useTopicEffect('orders', async () => {
+      throw new Error('toast failed')
+    })
+    return null
+  }
+  await mount(h(Toaster, { key: 't' }), {
+    onHandlerError: (error, meta) => failures.push([error.message, meta.topic]),
+  })
+
+  await publish('orders', { id: 'ord_async' })
+  await waitFor(() => assert.equal(failures.length, 1))
+  assert.deepEqual(failures[0], ['toast failed', 'orders'])
+  cleanup()
+})
+
 test('an inline useTopicEffect callback does not resubscribe every render', async () => {
   // If it did, the topic set would churn and §9.3 would reconnect the shared stream on
   // every parent render — discarding the cursor each time.

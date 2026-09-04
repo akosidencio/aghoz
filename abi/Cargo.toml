@@ -22,4 +22,4 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 # The version is not decoration: a path-only dependency cannot be published, and it is
 # what makes `cargo deny`'s wildcard rule pass. `scripts/set-version.mjs` bumps it.
-aghoz-core = { path = "../core", version = "0.4.2" }
+aghoz-core = { path = "../core", version = "0.5.0" }

@@ -1,0 +1,648 @@
+{
+  "version": "0.1",
+  "spec": "PROTOCOL.md",
+  "note": "Each vector drives a client's coverage state through `ops` and compares the topics reported at every `open`. `initialCursor` is the §5 cursor the client was constructed with, or null. Ops: [\"sync\", topics] — the client is about to open for this set; [\"open\", topics] — the stream for this set is open, and the vector's next expected entry is what it must report; [\"advance\", id] — a data frame the client accepted moved the cursor.",
+  "cutover": [
+    {
+      "id": "K1",
+      "ref": "§9.3",
+      "desc": "the first open of a page-load topic set reports nothing",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ]
+      ],
+      "expected": [
+        []
+      ]
+    },
+    {
+      "id": "K2",
+      "ref": "§9.3",
+      "desc": "a topic added before anything arrived shares the page's baseline and is not a cutover",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        []
+      ]
+    },
+    {
+      "id": "K3",
+      "ref": "§9.3",
+      "desc": "the §9.3 interleaving: a topic added after the cursor moved has no baseline",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "advance",
+          "1755083412345-12"
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        [
+          "b"
+        ]
+      ]
+    },
+    {
+      "id": "K4",
+      "ref": "§9.3",
+      "desc": "a client with no initial cursor and no events reports no cutover",
+      "initialCursor": null,
+      "ops": [
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        []
+      ]
+    },
+    {
+      "id": "K5",
+      "ref": "§9.3",
+      "desc": "a topic dropped and re-added while the cursor stood still is still covered",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "id": "K6",
+      "ref": "§9.3",
+      "desc": "a topic dropped, then re-added after the cursor moved, is a cutover",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "advance",
+          "1755083412345-12"
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        [],
+        [
+          "b"
+        ]
+      ]
+    },
+    {
+      "id": "K7",
+      "ref": "§9.3 / §9.4",
+      "desc": "reconnecting the same topic set after events is not a cutover",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "advance",
+          "1755083412345-12"
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        []
+      ]
+    },
+    {
+      "id": "K8",
+      "ref": "§9.3",
+      "desc": "a cutover is reported once, not on every later open",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "advance",
+          "1755083412345-12"
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        [
+          "b"
+        ],
+        []
+      ]
+    },
+    {
+      "id": "K9",
+      "ref": "§9.3 / §9.4",
+      "desc": "a connection attempt that never opened does not consume the cutover",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "advance",
+          "1755083412345-12"
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        [
+          "b"
+        ]
+      ]
+    },
+    {
+      "id": "K10",
+      "ref": "§9.3",
+      "desc": "a topic added and dropped before any stream opened is not reported later",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "advance",
+          "1755083412345-12"
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        []
+      ]
+    },
+    {
+      "id": "K11",
+      "ref": "§9.3",
+      "desc": "several topics added at once are reported together, sorted",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "advance",
+          "1755083412345-12"
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b",
+            "c"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b",
+            "c"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        [
+          "b",
+          "c"
+        ]
+      ]
+    },
+    {
+      "id": "K12",
+      "ref": "§9.3",
+      "desc": "an established topic is never reported alongside the new one",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ],
+        [
+          "advance",
+          "1755083412345-12"
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "advance",
+          "1755083412345-13"
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b",
+            "c"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b",
+            "c"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        [
+          "b"
+        ],
+        [
+          "c"
+        ]
+      ]
+    },
+    {
+      "id": "K13",
+      "ref": "§9.3",
+      "desc": "every topic going away and coming back after events is a cutover for all of them",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "advance",
+          "1755083412345-12"
+        ],
+        [
+          "sync",
+          []
+        ],
+        [
+          "advance",
+          "1755083412345-13"
+        ],
+        [
+          "sync",
+          [
+            "a",
+            "b"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a",
+            "b"
+          ]
+        ]
+      ],
+      "expected": [
+        [],
+        [
+          "a",
+          "b"
+        ]
+      ]
+    },
+    {
+      "id": "K14",
+      "ref": "§9.3",
+      "desc": "the cursor moving while the set is empty leaves the next open uncovered",
+      "initialCursor": "1755083412345-0",
+      "ops": [
+        [
+          "sync",
+          []
+        ],
+        [
+          "advance",
+          "1755083412345-12"
+        ],
+        [
+          "sync",
+          [
+            "a"
+          ]
+        ],
+        [
+          "open",
+          [
+            "a"
+          ]
+        ]
+      ],
+      "expected": [
+        [
+          "a"
+        ]
+      ]
+    }
+  ]
+}

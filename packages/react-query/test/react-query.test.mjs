@@ -207,8 +207,13 @@ test('a gap refetches a folded cache instead of leaving it silently wrong', asyn
   // The gap is real, not simulated: publish past `maxHistoryBytes`, then connect with
   // a cursor pointing at an event that has since been trimmed. The server answers
   // `earliest`, per §8.1.
-  const first = await hub.publish('orders', 'x'.repeat(120))
-  for (let i = 0; i < 20; i++) await hub.publish('orders', 'x'.repeat(120))
+  //
+  // The padding is inside a JSON object rather than being a bare string of x's, because
+  // this test is about the gap and the default parse is `JSON.parse`. Unparseable
+  // payloads make every replayed event a §9.2 handler failure, which now invalidates on
+  // its own and would leave this counting two failures rather than one gap.
+  const first = await hub.publish('orders', { pad: 'x'.repeat(110) })
+  for (let i = 0; i < 20; i++) await hub.publish('orders', { pad: 'x'.repeat(110) })
 
   let calls = 0
   const gaps = []
@@ -234,11 +239,14 @@ test('a gap refetches a folded cache instead of leaving it silently wrong', asyn
   await waitFor(() => assert.deepEqual(gaps, ['history-truncated']), { timeout: 4000 })
 
   // And the cache went back to the server rather than carrying on folding onto a value
-  // that is missing everything the gap covered.
-  await waitFor(() => assert.equal(screen.getByTestId('v').textContent, 'server-2'), {
-    timeout: 4000,
-  })
-  assert.equal(calls, 2)
+  // that is missing everything the gap covered. What replay still had to offer folds on
+  // top of that answer, which is the correct order and the reason this asserts on the
+  // prefix: the refetched value is the base, not something the fold overwrote.
+  await waitFor(
+    () => assert.ok(screen.getByTestId('v').textContent.startsWith('server-2')),
+    { timeout: 4000 },
+  )
+  assert.equal(calls, 2, 'one refetch for the gap, and no refetch per replayed event')
   cleanup()
 })
 
@@ -264,5 +272,153 @@ test('the gap alone refetches, with no event on the topic at all', async () => {
   })
   await new Promise((r) => setTimeout(r, 150))
   assert.equal(calls, 2, 'exactly one refetch, caused by the gap')
+  cleanup()
+})
+
+// ------------------------------------------------------- §9.3 topic-set cutover
+
+test('a lazily mounted topic refetches once its stream is open', async () => {
+  // §9.3: the cursor the replacement stream resumes from advanced while `audit` was not
+  // subscribed, so it is not a baseline for `audit`. Nothing is reported as a gap —
+  // the hub is right that it lost nothing — and a cache that trusted the cursor here
+  // would serve whatever the query happened to fetch before the stream carried it.
+  let orderCalls = 0
+  let auditCalls = 0
+  let show
+
+  function Orders() {
+    useTopicInvalidation('orders', ['orders'])
+    const { data } = useQuery({ queryKey: ['orders'], queryFn: async () => `orders-${++orderCalls}` })
+    return h('span', { 'data-testid': 'o' }, data ?? '')
+  }
+
+  function Audit() {
+    useTopicInvalidation('audit', ['audit'])
+    const { data } = useQuery({ queryKey: ['audit'], queryFn: async () => `audit-${++auditCalls}` })
+    return h('span', { 'data-testid': 'a' }, data ?? '')
+  }
+
+  function Shell() {
+    const [visible, setVisible] = React.useState(false)
+    show = setVisible
+    return h(React.Fragment, null, h(Orders, { key: 'o' }), visible ? h(Audit, { key: 'a' }) : null)
+  }
+
+  const { screen } = await mount(h(Shell, { key: 's' }), { initialCursor: hub.cursor() })
+  await waitFor(() => assert.equal(screen.getByTestId('o').textContent, 'orders-1'))
+
+  // Moves the cursor while `audit` has no subscriber — the interleaving §9.3 describes.
+  await publish('orders', { id: 1 })
+  await waitFor(() => assert.equal(screen.getByTestId('o').textContent, 'orders-2'))
+
+  await act(async () => {
+    show(true)
+    await new Promise((r) => setTimeout(r, 200))
+  })
+
+  // Mounted once, then refetched once because the stream that now carries `audit`
+  // resumed from a cursor that never covered it. No `audit` event was ever published.
+  await waitFor(() => assert.equal(auditCalls, 2), { timeout: 4000 })
+  await waitFor(() => assert.equal(screen.getByTestId('a').textContent, 'audit-2'))
+  cleanup()
+})
+
+test('a topic mounting before anything arrives does not refetch', async () => {
+  // The other half of the rule. Every component in a first render pass — including the
+  // ones a suspense boundary mounts a tick late — shares the cursor the page's data was
+  // read at, so firing here would put a second fetch on every page load and teach
+  // applications to switch the signal off.
+  let auditCalls = 0
+  let show
+
+  function Audit() {
+    useTopicInvalidation('audit', ['audit'])
+    const { data } = useQuery({ queryKey: ['audit2'], queryFn: async () => `audit-${++auditCalls}` })
+    return h('span', { 'data-testid': 'a' }, data ?? '')
+  }
+
+  function Shell() {
+    const [visible, setVisible] = React.useState(false)
+    show = setVisible
+    return h(React.Fragment, null, h(Orders, { key: 'o' }), visible ? h(Audit, { key: 'a' }) : null)
+  }
+
+  function Orders() {
+    useTopicInvalidation('orders', ['orders3'])
+    return h('span', null, 'x')
+  }
+
+  await mount(h(Shell, { key: 's' }), { initialCursor: hub.cursor() })
+
+  await act(async () => {
+    show(true)
+    await new Promise((r) => setTimeout(r, 250))
+  })
+
+  assert.equal(auditCalls, 1, 'mounted once, and no cutover refetch on top of it')
+  cleanup()
+})
+
+// ----------------------------------------------------- §9.2 handler failure
+
+test('a parse failure invalidates instead of leaving an advanced cursor over stale state', async () => {
+  // The cursor advances before handlers run (§9.2), so the event that threw is never
+  // delivered again. Without this the fold is permanently behind by one event and
+  // nothing anywhere reports it — the exact silent staleness this project exists to
+  // remove, reached through the adapter rather than the transport.
+  let calls = 0
+  const errors = []
+
+  function Orders() {
+    useTopicQueryData('orders', ['orders-fold'], (current, event) => [...current, event.id])
+    const { data } = useQuery({
+      queryKey: ['orders-fold'],
+      queryFn: async () => [`server-${++calls}`],
+    })
+    return h('span', { 'data-testid': 'v' }, (data ?? []).join(','))
+  }
+
+  const { screen } = await mount(h(Orders, { key: 'o' }), {
+    initialCursor: hub.cursor(),
+    onError: (error) => errors.push(error),
+  })
+  await waitFor(() => assert.equal(screen.getByTestId('v').textContent, 'server-1'))
+
+  // A payload the default `JSON.parse` cannot read. Published as a raw string, which is
+  // how a service that forgot to serialise its event body reaches a browser.
+  await publish('orders', 'this is not json')
+
+  await waitFor(() => assert.equal(screen.getByTestId('v').textContent, 'server-2'), {
+    timeout: 4000,
+  })
+  assert.equal(calls, 2, 'the failure became a refetch, not a silently skipped event')
+  // And it is still reported: the invalidation is recovery, not suppression.
+  assert.ok(errors.length >= 1, 'the parse failure still reaches onError')
+  cleanup()
+})
+
+test('an updater that throws invalidates the query it could not fold into', async () => {
+  let calls = 0
+
+  function Orders() {
+    useTopicQueryData('orders', ['orders-throw'], () => {
+      throw new Error('fold failed')
+    })
+    const { data } = useQuery({
+      queryKey: ['orders-throw'],
+      queryFn: async () => [`server-${++calls}`],
+    })
+    return h('span', { 'data-testid': 'v' }, (data ?? []).join(','))
+  }
+
+  const { screen } = await mount(h(Orders, { key: 'o' }), { initialCursor: hub.cursor() })
+  await waitFor(() => assert.equal(screen.getByTestId('v').textContent, 'server-1'))
+
+  await publish('orders', { id: 1 })
+
+  await waitFor(() => assert.equal(screen.getByTestId('v').textContent, 'server-2'), {
+    timeout: 4000,
+  })
+  assert.equal(calls, 2)
   cleanup()
 })

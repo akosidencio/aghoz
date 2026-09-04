@@ -1,6 +1,6 @@
 {
   "name": "@aghoz/history-file",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Disk-backed history for aghoz — makes SSE replay survive a process restart, so a deploy does not make every connected client refetch.",
   "keywords": [
     "server-sent-events",

@@ -21,6 +21,7 @@ export {
   parseId,
   compareIds,
   validTopic,
+  validOrigin,
   utf8Length,
   encodeFrame,
   encodeControl,

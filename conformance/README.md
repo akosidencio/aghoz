@@ -4,12 +4,18 @@ The shared test corpus for every implementation of the wire protocol. It is the 
 described in `PROTOCOL.md` §12, and it is the only reason having more than one hub
 implementation is a defensible position rather than a slow-motion divergence.
 
+This is the **hub's** corpus. The subscriber has its own — [`client/`](./client/) — for
+the §9 rules a server cannot check for you, and [`http/`](./http/) covers the HTTP layer
+above the core.
+
 ## Layout
 
 ```
-vectors.json         the corpus — 94 vectors in nine groups
+vectors.json         the corpus — 97 vectors in nine groups
 build-vectors.mjs    regenerates vectors.json
 runner.mjs           runs the corpus against any JavaScript implementation
+client/              the client corpus — §9, for subscriber implementations
+http/                the HTTP suite — 42 scenarios over a real socket
 ```
 
 The Rust side reads the same `vectors.json` from `core/tests/conformance.rs`, and the
@@ -36,7 +42,7 @@ The runner exits non-zero and prints expected-vs-actual for every divergence.
 | `idOrder` | 4 | §2.1 id comparison |
 | `idParse` | 21 | §2.1 which strings are canonical ids, and the 2^53−1 bound |
 | `monotonic` | 3 | §2.2 clock-regression handling |
-| `checkpoint` | 7 | §4.4 / §7.1 whether a reconnect is told it missed events |
+| `checkpoint` | 10 | §4.4 / §7.1 whether a reconnect is told it missed events |
 | `append` | 9 | §2 / §4.5 the externally-assigned-id path a backplane needs |
 | `buffer` | 7 | §8.2 the slow-consumer threshold, by absolute depth and by delta |
 

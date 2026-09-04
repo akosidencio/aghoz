@@ -1,0 +1,13 @@
+{
+  "name": "aghoz-example-outbox-sqlite",
+  "private": true,
+  "type": "module",
+  "description": "The publication boundary, executable: a transactional outbox and a relay in front of an aghoz hub.",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.mjs"
+  },
+  "dependencies": {
+    "@aghoz/server": "workspace:*"
+  }
+}

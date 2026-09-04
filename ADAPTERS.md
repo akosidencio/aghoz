@@ -275,9 +275,10 @@ writes. Every comment in there names a failure that actually happened.
 
 ## Proving it
 
-Two corpora, both language-neutral, both mandatory.
+Two corpora for a hub, both language-neutral, both mandatory. A third — the client
+corpus — applies only if you are porting the *subscriber* side.
 
-**1. The vector corpus** — [`conformance/`](./conformance/), 94 vectors in nine groups.
+**1. The vector corpus** — [`conformance/`](./conformance/), 97 vectors in nine groups.
 Read `vectors.json` directly from your language. Every group is a pure function of the
 core, so if you bound to the ABI correctly you get these for free; if you reimplemented
 something, this is where it shows.
@@ -290,8 +291,13 @@ it. This is the one that judges *your* code.
 node conformance/http/runner.mjs "your-command-to-boot-the-test-app"
 ```
 
+**3. The client corpus** — [`conformance/client/`](./conformance/client/), for a
+subscriber rather than a hub. §9's rules are the ones no server-side suite can check:
+nothing on the wire distinguishes a client that reports a §9.3 topic-set cutover from one
+that silently serves a topic it has no baseline for.
+
 Report the corpus versions you pass. `vectors.json` and `scenarios.json` each carry a
-`version`, bumped whenever an expectation changes.
+`version`, bumped whenever an expectation changes, and so does the client corpus.
 
 ### Expect the checklist above to be wrong somewhere
 
