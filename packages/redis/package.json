@@ -1,6 +1,6 @@
 {
   "name": "@aghoz/redis",
-  "version": "0.5.0",
+  "version": "0.4.3",
   "description": "Redis Streams backplane for aghoz — shared sequencing, replay and fan-out across every process, pod or cluster worker.",
   "keywords": [
     "server-sent-events",

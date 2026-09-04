@@ -1,6 +1,6 @@
 {
   "name": "@aghoz/vue",
-  "version": "0.5.0",
+  "version": "0.4.3",
   "description": "Vue 3 client for Aghoz — composables for resumable edge event streams with explicit replay gaps.",
   "keywords": [
     "server-sent-events",

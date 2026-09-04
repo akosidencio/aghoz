@@ -10,7 +10,7 @@ resolver = "2"
 overflow-checks = true
 
 [workspace.package]
-version = "0.5.0"
+version = "0.4.3"
 edition = "2021"
 # The floor, not the pin — see rust-toolchain.toml. Raised by `napi-build`, which the
 # Node binding needs; `aghoz-core` on its own builds back to 1.82.

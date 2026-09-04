@@ -4,7 +4,7 @@ All packages ship in lockstep — the conformance guarantee only holds if the pa
 sharing the corpus share a version. Reasoning for anything significant lives in
 [DECISIONS.md](./DECISIONS.md).
 
-## 0.5.0 — 2026-09-04
+## 0.4.3 — 2026-09-04
 
 ### Added
 
@@ -42,8 +42,8 @@ error until you add them; using the shipped clients is unaffected.
 
 Rust callers must construct `EventId` with `EventId::new` and read it through `ms()` and
 `seq()`, handle `PublishError::IdOutOfRange`, and call pointer-taking `aghoz-abi` exports
-inside `unsafe`. The C symbols and C header declarations are unchanged. These source-level
-changes are why this release is 0.5.0 rather than the originally planned 0.4.3.
+inside `unsafe`. The C symbols and C header declarations are unchanged, and the crates are
+not published, so this lands as a patch: nothing installed from npm changes shape.
 
 ## 0.4.2 — 2026-08-18
 

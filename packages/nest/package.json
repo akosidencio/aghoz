@@ -1,6 +1,6 @@
 {
   "name": "@aghoz/nest",
-  "version": "0.5.0",
+  "version": "0.4.3",
   "description": "NestJS adapter for Aghoz resumable edge event streams, mounted inside your existing app on either the Express or Fastify platform.",
   "keywords": [
     "server-sent-events",
