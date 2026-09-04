@@ -5,6 +5,98 @@ Newest first.
 
 ---
 
+## D18 — The bounds that only held on the string path, and an ABI that admits it is unsafe
+
+**Date:** 4 September 2026 · **Status:** accepted
+
+### Three rules that were enforced in one place each and assumed everywhere else
+
+A Rust audit against the official guidance turned up four defects with one shape: a rule
+this project states clearly, enforced at exactly one of the paths that can break it.
+
+**`cargo clippy` had never run in CI.** Twenty-eight *deny-by-default* errors were
+waiting, all of them `not_unsafe_ptr_arg_deref`: every entry point in `abi/` was a safe
+`extern "C" fn` that dereferenced a caller's pointer. The crate builds as an `rlib` as
+well as a `cdylib`, so "the caller is C" is a convention, not something the compiler
+knows — safe Rust could call `ag_publish(garbage, ..)` and reach undefined behaviour with
+no `unsafe` written anywhere. `lib.rs` opens by saying all of the unsafe lives in that
+file and nothing hides inside a signature; the signatures said otherwise.
+
+**§2's 2^53 − 1 bound held only for ids that arrived as text.** `EventId` had public
+fields, so `EventId { ms, seq }` skipped `parse` entirely — and the numeric paths are
+real ones: `ag_subscribe` assembles a cursor from two `uint64_t`s, and every `publish`
+takes `now_ms` from the host's clock. A binding reporting nanoseconds — the way this
+mistake actually happens — lands two orders of magnitude past the bound. Measured, on the
+pre-fix build:
+
+```
+h.append(EventId { ms: u64::MAX, seq: u64::MAX }, ..)   → Ok
+h.publish(1000, ..)   debug:   panicked, 'attempt to add with overflow'
+                      release: id = 18446744073709551615-0   ← the cursor went backwards
+```
+
+The release line is the one that matters: a cursor below every id a client already holds
+reads as "nothing new", forever, with nothing reported.
+
+**Subscriber ids were truncated to `u32` crossing into Node.** `registry.rs` explains at
+length that a recycled id "lets a write scheduled for a closed subscriber land on whoever
+inherited the number — a cross-tenant leak that would be near-impossible to reproduce",
+and `as u32` reintroduced exactly that at 2^32 subscribes: `create-hub.ts` keys its
+`connections` map by that number, so subscriber 4294967297 collides with subscriber 1 and
+inherits its fan-out. The TypeScript core, using JavaScript numbers throughout, does not
+wrap — so the two cores disagreed about their own core invariant.
+
+**`~denied` could be made unparseable.** `json_string` escaped `"` and `\` only,
+documented as safe because §3 forbids control characters in a topic. §3 is enforced on
+*subscribe*; `denied_frame` takes whatever list a binding hands it. A topic with a raw LF
+forged nothing — `write_data_lines` splits it onto another `data:` line — but the client
+rejoins those lines with a newline, so `JSON.parse` threw on the one frame that names
+which topics were refused.
+
+### Decision
+
+**Every ABI entry point that takes a pointer is `pub unsafe extern "C" fn`, with a
+`# Safety` section stating its contract.** No symbol changes, no C declaration changes,
+`aghoz.h` is untouched apart from prose. `with_hub` now takes `Option<&ag_hub>` so the
+pointer half is one line per entry point and the lock and panic boundary contain no
+unsafe at all — the alternative, passing the raw pointer down, put each closure body
+*inside* an `unsafe` block, which makes the blocks it writes for its own dereferences
+redundant and therefore unwritten. All 42 unsafe blocks carry a `// SAFETY:` comment.
+
+**`EventId`'s fields are private.** The ways in are `parse` and the new `new(ms, seq) ->
+Option<EventId>`, and both refuse anything above `MAX_ID_COMPONENT`. `Sequence::next`
+returns `Option` and stops at the bound rather than stepping over it. A publish that
+would leave the range is `PublishError::IdOutOfRange` and assigns no id.
+
+That maps to `AG_ERR_MALFORMED_ID` rather than a new status, so **the ABI stays at
+3200**. It is the same rule being broken — `ag_append("9007199254740992-0", ..)` already
+returned it — and a new code would be a major bump under D3's own reasoning while saying
+nothing a caller could act on differently. `ag_publish` and `ag_subscribe` can now return
+it and could not before; both are documented, and the codes they returned before are
+unchanged.
+
+**Subscriber ids cross into JavaScript as `f64`.** Exact to 2^53, which is the bound §2
+already puts on an event id, and `number` in the `.d.ts` either way — the seam does not
+change shape. `json_string` escapes the whole control range, so a `~denied` frame is
+parseable whatever a binding puts in it.
+
+**The TypeScript core takes the same bound**, in `Hub#nextId`, because a cursor one core
+hands out that the other refuses is worse than either behaviour on its own.
+
+### The gate that would have caught all of it
+
+`clippy --all-targets -- -D warnings`, `fmt --check`, `doc` with warnings denied, and
+`cargo deny` now run in CI beside the tests and Miri. The lint policy lives in
+`[workspace.lints]`, and the security-relevant half of it — the casts, the arithmetic,
+the panicking accessors — is warned on everywhere; where a site is provably in range it
+takes an `allow` with the proof written next to it, which is the point. `release` builds
+with `overflow-checks = true`: an overflow here is a protocol violation, and shipping the
+wrapping behaviour while testing the trapping one is two behaviours from one source.
+`rust-toolchain.toml` pins the toolchain, and `rust-version` records the floor — 1.88,
+set by `napi-build`, not by anything this code does.
+
+---
+
 ## D17 — Cross-origin authentication is connection configuration, not protocol data
 
 **Date:** 18 August 2026 · **Status:** accepted

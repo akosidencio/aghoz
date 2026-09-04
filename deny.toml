@@ -1,0 +1,32 @@
+# `cargo deny check` — advisories, licences, bans, sources.
+#
+# Worth having at three dependencies rather than at thirty: the moment to notice a new
+# transitive crate is when there is one, and the moment to notice an advisory is the day
+# it lands, not the day someone remembers to look.
+
+[advisories]
+# Anything unfixed fails the build. There are no exceptions today; when one is needed it
+# goes here with the reason and the issue link beside it, never as a blanket ignore.
+ignore = []
+
+[licenses]
+# The project is MIT OR Apache-2.0, so anything it links must be compatible with both.
+# Only what the graph actually uses. Adding to this list should be a deliberate act with
+# a look at what pulled the crate in, not a pre-emptive catch-all.
+# ISC arrives through napi -> napi-sys -> libloading.
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "ISC"]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of one crate in the graph is how a "fixed" advisory stays live in the
+# copy nothing updated.
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace's own crates depend on each other by path, which is not the unpinned
+# `"*"` version requirement this rule is aimed at.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

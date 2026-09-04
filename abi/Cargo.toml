@@ -11,6 +11,8 @@ keywords.workspace = true
 categories.workspace = true
 readme = "../README.md"
 
+[lints]
+workspace = true
 [lib]
 name = "aghoz"
 # cdylib for dynamic FFI (Python ctypes, Ruby FFI, Node); staticlib for cgo and for
@@ -18,4 +20,6 @@ name = "aghoz"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-aghoz-core = { path = "../core" }
+# The version is not decoration: a path-only dependency cannot be published, and it is
+# what makes `cargo deny`'s wildcard rule pass. `scripts/set-version.mjs` bumps it.
+aghoz-core = { path = "../core", version = "0.4.2" }

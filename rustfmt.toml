@@ -1,0 +1,5 @@
+# The width this codebase was already written to. Default rustfmt is 100, and the
+# difference showed up as a handful of hand-wrapped lines that `cargo fmt --check` wanted
+# to break up — which is why the check was never in CI.
+max_width = 100
+use_small_heuristics = "Max"

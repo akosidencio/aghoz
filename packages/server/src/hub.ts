@@ -218,13 +218,31 @@ export class Hub {
    * §2.2 — assign the next id. Never returns an id less than or equal to the previous
    * one: if the wall clock regresses or stalls, the millisecond is reused and the
    * sequence advances. A backwards clock must never surface as a backwards cursor.
+   *
+   * Throws rather than assigning an id outside §2's range. `parseId` has always applied
+   * that bound, but only to ids arriving as *text* — so the numeric path here could mint
+   * one no implementation is allowed to produce, and the Rust core would then refuse the
+   * very cursor this one handed out. The realistic way in is a clock in the wrong unit:
+   * nanoseconds land two orders of magnitude past `Number.MAX_SAFE_INTEGER`, where
+   * neighbouring integers stop being distinguishable and one cursor names two events.
+   *
+   * Not a `CoreError`: nothing the client sent is at fault, so the handler answers 500.
    */
   #nextId(nowMs: number): EventId {
+    const previousMs = this.#lastMs
+    const previousSeq = this.#lastSeq
     if (nowMs > this.#lastMs) {
       this.#lastMs = nowMs
       this.#lastSeq = 0
     } else {
       this.#lastSeq++
+    }
+    if (!Number.isSafeInteger(this.#lastMs) || !Number.isSafeInteger(this.#lastSeq)) {
+      // Put the sequence back, so a refused publish costs no ids — the same reason the
+      // topic check above runs before one is drawn.
+      this.#lastMs = previousMs
+      this.#lastSeq = previousSeq
+      throw new RangeError(`nowMs must be whole milliseconds below 2^53-1 — got ${nowMs}`)
     }
     return { ms: this.#lastMs, seq: this.#lastSeq }
   }

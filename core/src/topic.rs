@@ -24,6 +24,8 @@ pub enum TopicError {
 /// what `String.length` gives in JavaScript, and `len()` gives for a Python `str` —
 /// admits topics up to three times over the limit. That is conformance vector T15, and
 /// it is a real bug this corpus caught rather than a hypothetical one.
+// `bytes[0]` follows the `is_empty` check above.
+#[allow(clippy::indexing_slicing)]
 pub fn validate_topic(topic: &str) -> Result<(), TopicError> {
     let bytes = topic.as_bytes();
     if bytes.is_empty() {
@@ -41,6 +43,14 @@ pub fn validate_topic(topic: &str) -> Result<(), TopicError> {
     Ok(())
 }
 
+#[allow(
+    // See the note on the integration tests: a test asserts by panicking.
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

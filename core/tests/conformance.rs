@@ -5,6 +5,17 @@
 //! reason more than one implementation of this protocol is a defensible position, so it
 //! must never fork.
 
+// A test asserts by panicking, so the lints that forbid panicking in library code are
+// exactly wrong here: `unwrap` on a value the corpus guarantees, or an index into a
+// vector this file just built, is the assertion. The library's own targets keep the rule.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use aghoz_core::{
     encode_frame, validate_origin, validate_topic, BufferVerdict, Checkpoint, EventId, Hub,
     HubConfig,
@@ -23,10 +34,8 @@ fn encode_vectors() {
     let c = corpus();
     let mut failures = Vec::new();
     for v in c["encode"].as_array().unwrap() {
-        let id = EventId {
-            ms: v["ms"].as_u64().unwrap(),
-            seq: v["seq"].as_u64().unwrap(),
-        };
+        let id = EventId::new(v["ms"].as_u64().unwrap(), v["seq"].as_u64().unwrap())
+            .expect("every vector id is inside §2's range");
         let got = String::from_utf8(encode_frame(
             id,
             v["topic"].as_str().unwrap(),
@@ -88,8 +97,8 @@ fn id_order_vectors() {
     for v in c["idOrder"].as_array().unwrap() {
         let a = v["a"].as_array().unwrap();
         let b = v["b"].as_array().unwrap();
-        let a = EventId { ms: a[0].as_u64().unwrap(), seq: a[1].as_u64().unwrap() };
-        let b = EventId { ms: b[0].as_u64().unwrap(), seq: b[1].as_u64().unwrap() };
+        let a = EventId::new(a[0].as_u64().unwrap(), a[1].as_u64().unwrap()).unwrap();
+        let b = EventId::new(b[0].as_u64().unwrap(), b[1].as_u64().unwrap()).unwrap();
         let got = match a.cmp(&b) {
             std::cmp::Ordering::Less => -1,
             std::cmp::Ordering::Equal => 0,
@@ -116,7 +125,10 @@ fn checkpoint_vectors() {
     let mut failures = Vec::new();
     for v in c["checkpoint"].as_array().unwrap() {
         let config = HubConfig {
-            max_history_bytes: v["maxHistoryBytes"].as_u64().unwrap() as usize,
+            max_history_bytes: v["maxHistoryBytes"]
+                .as_u64()
+                .and_then(|v| usize::try_from(v).ok())
+                .unwrap(),
             ..HubConfig::default()
         };
         let mut hub = Hub::new(config);
@@ -131,9 +143,9 @@ fn checkpoint_vectors() {
             .unwrap();
         }
 
-        let cursor = v["cursor"].as_array().map(|a| EventId {
-            ms: a[0].as_u64().unwrap(),
-            seq: a[1].as_u64().unwrap(),
+        let cursor = v["cursor"].as_array().map(|a| {
+            EventId::new(a[0].as_u64().unwrap(), a[1].as_u64().unwrap())
+                .expect("every vector cursor is inside §2's range")
         });
         let effect = hub.subscribe(vec!["t".to_string()], None, cursor).unwrap();
         let got = match effect.checkpoint {
@@ -196,16 +208,17 @@ fn append_vectors() {
             let origin = a[4].as_str();
 
             let bytes = match a[0].as_str().unwrap() {
-                "publish" => hub
-                    .publish(a[1].as_u64().unwrap(), topic, payload, origin)
-                    .unwrap()
-                    .frame,
+                "publish" => {
+                    hub.publish(a[1].as_u64().unwrap(), topic, payload, origin).unwrap().frame
+                }
                 "append" => {
-                    let id = EventId::parse(a[1].as_str().unwrap()).expect("corpus id is canonical");
+                    let id =
+                        EventId::parse(a[1].as_str().unwrap()).expect("corpus id is canonical");
                     hub.append(id, topic, payload, origin).unwrap().frame
                 }
                 "encode" => {
-                    let id = EventId::parse(a[1].as_str().unwrap()).expect("corpus id is canonical");
+                    let id =
+                        EventId::parse(a[1].as_str().unwrap()).expect("corpus id is canonical");
                     hub.encode(id, topic, payload, origin).unwrap()
                 }
                 other => panic!("unknown op: {other}"),
@@ -245,7 +258,10 @@ fn buffer_vectors() {
     let mut failures = Vec::new();
     for v in c["buffer"].as_array().unwrap() {
         let config = HubConfig {
-            max_buffer_bytes: v["maxBufferBytes"].as_u64().unwrap() as usize,
+            max_buffer_bytes: v["maxBufferBytes"]
+                .as_u64()
+                .and_then(|v| usize::try_from(v).ok())
+                .unwrap(),
             ..HubConfig::default()
         };
         let mut hub = Hub::new(config);
@@ -257,7 +273,7 @@ fn buffer_vectors() {
             .iter()
             .map(|op| {
                 let a = op.as_array().unwrap();
-                let n = a[1].as_u64().unwrap() as usize;
+                let n = a[1].as_u64().and_then(|v| usize::try_from(v).ok()).unwrap();
                 let verdict = match a[0].as_str().unwrap() {
                     "buffer" => hub.note_buffer(id, n),
                     "sent" => hub.note_sent(id, n),
@@ -272,12 +288,8 @@ fn buffer_vectors() {
             })
             .collect();
 
-        let want: Vec<&str> = v["expected"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| s.as_str().unwrap())
-            .collect();
+        let want: Vec<&str> =
+            v["expected"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
         if got != want {
             failures.push(format!(
                 "  {}  {}\n      expected: {want:?}\n      actual:   {got:?}",
@@ -306,12 +318,6 @@ fn monotonic_vectors() {
             .iter()
             .map(|s| s.as_str().unwrap().to_string())
             .collect();
-        assert_eq!(
-            got,
-            want,
-            "{}  {}",
-            v["id"].as_str().unwrap(),
-            v["desc"].as_str().unwrap()
-        );
+        assert_eq!(got, want, "{}  {}", v["id"].as_str().unwrap(), v["desc"].as_str().unwrap());
     }
 }

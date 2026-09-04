@@ -40,6 +40,14 @@ pub fn validate_origin(origin: &str) -> Result<(), OriginError> {
     Ok(())
 }
 
+#[allow(
+    // See the note on the integration tests: a test asserts by panicking.
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

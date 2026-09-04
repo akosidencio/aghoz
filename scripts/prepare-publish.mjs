@@ -93,7 +93,7 @@ ${
     }
 
 Full documentation, the integration guides and the wire protocol live in the monorepo:
-**https://github.com/thinkgrid-labs/aghoz**
+**https://github.com/akosidencio/aghoz**
 
 ## License
 

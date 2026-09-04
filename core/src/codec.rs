@@ -13,12 +13,12 @@ use crate::id::EventId;
 /// callers needing byte-exact payloads must encode them, which is why non-string data
 /// is JSON-serialised by the bindings.
 pub fn encode_frame(id: EventId, topic: &str, payload: &str, origin: Option<&str>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + topic.len() + 48);
+    let mut out = Vec::with_capacity(payload.len().saturating_add(topic.len()).saturating_add(48));
 
     out.extend_from_slice(b"id: ");
-    push_u64(&mut out, id.ms);
+    push_u64(&mut out, id.ms());
     out.push(b'-');
-    push_u64(&mut out, id.seq);
+    push_u64(&mut out, id.seq());
     out.push(b'\n');
 
     out.extend_from_slice(b"event: ");
@@ -44,7 +44,8 @@ pub fn encode_frame(id: EventId, topic: &str, payload: &str, origin: Option<&str
 /// must never advance a client's cursor — if `~gap` had an id, the client would record
 /// it and then discard the very replay it was told to expect.
 pub fn encode_control(name: &str, json_payload: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(json_payload.len() + name.len() + 24);
+    let mut out =
+        Vec::with_capacity(json_payload.len().saturating_add(name.len()).saturating_add(24));
     out.extend_from_slice(b"event: ~");
     out.extend_from_slice(name.as_bytes());
     out.push(b'\n');
@@ -53,6 +54,12 @@ pub fn encode_control(name: &str, json_payload: &str) -> Vec<u8> {
     out
 }
 
+// Indexing and `+ 1` are bounded by the loop itself: `i < payload.len()` guards every
+// read, `start` is only ever set to an index the loop has already passed, and the final
+// slice runs from `start` to the end. The alternative — `get`/`split_at_checked` with an
+// unreachable arm on each — adds branches that can only be dead and hides the bound
+// rather than stating it. 97 conformance vectors pin this function's output byte for byte.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn write_data_lines(out: &mut Vec<u8>, payload: &[u8]) {
     let mut start = 0usize;
     let mut i = 0usize;
@@ -73,6 +80,9 @@ fn write_data_lines(out: &mut Vec<u8>, payload: &[u8]) {
     out.push(b'\n');
 }
 
+// `buf` is 20 bytes, which is the digit count of `u64::MAX`, so `i` cannot reach zero
+// before `n` does; `n % 10` is a single digit and `n /= 10` terminates.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn push_u64(out: &mut Vec<u8>, mut n: u64) {
     if n == 0 {
         out.push(b'0');
@@ -88,6 +98,14 @@ fn push_u64(out: &mut Vec<u8>, mut n: u64) {
     out.extend_from_slice(&buf[i..]);
 }
 
+#[allow(
+    // See the note on the integration tests: a test asserts by panicking.
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,7 +117,7 @@ mod tests {
     #[test]
     fn no_payload_can_inject_a_field() {
         let f = s(encode_frame(
-            EventId { ms: 1, seq: 0 },
+            EventId::new(1, 0).expect("inside §2's range"),
             "chat",
             "hello\n\nevent: ~gap\ndata: forged",
             None,

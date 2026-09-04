@@ -5,10 +5,27 @@
 //! choice is drift, so this test pays it back: every exported symbol must be declared,
 //! and every declaration must exist.
 
+// A test asserts by panicking, so the lints that forbid panicking in library code are
+// exactly wrong here: `unwrap` on a value the corpus guarantees, or an index into a
+// vector this file just built, is the assertion. The library's own targets keep the rule.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 const SOURCE: &str = include_str!("../src/lib.rs");
 const HEADER: &str = include_str!("../include/aghoz.h");
 
-/// Symbols the source exports via `#[no_mangle] pub extern "C"`.
+/// Symbols the source exports via `#[no_mangle] pub [unsafe] extern "C"`.
+///
+/// `unsafe` is accepted because every entry point that takes a pointer is one: an
+/// `extern "C" fn` that dereferences what a caller handed it is unsound as safe Rust —
+/// this crate builds as an `rlib` too, so "the caller is C" is not a guarantee the
+/// compiler has. It changes no symbol and no C declaration, which is why the header
+/// below is unchanged.
 fn exported() -> Vec<String> {
     let mut names = Vec::new();
     let mut previous_was_no_mangle = false;
@@ -19,7 +36,10 @@ fn exported() -> Vec<String> {
             continue;
         }
         if previous_was_no_mangle {
-            if let Some(rest) = trimmed.strip_prefix("pub extern \"C\" fn ") {
+            let declaration = trimmed
+                .strip_prefix("pub unsafe extern \"C\" fn ")
+                .or_else(|| trimmed.strip_prefix("pub extern \"C\" fn "));
+            if let Some(rest) = declaration {
                 if let Some(name) = rest.split('(').next() {
                     names.push(name.to_string());
                 }
@@ -34,14 +54,9 @@ fn exported() -> Vec<String> {
 fn every_exported_symbol_is_declared_in_the_header() {
     let symbols = exported();
     assert!(!symbols.is_empty(), "parser found no exports — it has drifted from the source");
-    let missing: Vec<&String> = symbols
-        .iter()
-        .filter(|name| !HEADER.contains(name.as_str()))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "exported but undeclared in aghoz.h: {missing:?}"
-    );
+    let missing: Vec<&String> =
+        symbols.iter().filter(|name| !HEADER.contains(name.as_str())).collect();
+    assert!(missing.is_empty(), "exported but undeclared in aghoz.h: {missing:?}");
 }
 
 #[test]
@@ -70,10 +85,7 @@ fn every_header_declaration_exists_in_the_source() {
             }
         }
     }
-    assert!(
-        undefined.is_empty(),
-        "declared in aghoz.h but not exported: {undefined:?}"
-    );
+    assert!(undefined.is_empty(), "declared in aghoz.h but not exported: {undefined:?}");
 }
 
 /// The header names the current ABI revision in prose, and prose drifts.
@@ -120,19 +132,15 @@ fn status_codes_agree_between_source_and_header() {
         ("AG_CHECKPOINT_EARLIEST", "2"),
         ("AG_GAP_SLOW_CONSUMER", "1"),
     ] {
-        let in_header = HEADER
-            .lines()
-            .filter(|l| l.trim_start().starts_with("#define"))
-            .any(|l| {
-                let mut parts = l.split_whitespace();
-                parts.next();
-                parts.next() == Some(name) && parts.next() == Some(value)
-            });
+        let in_header = HEADER.lines().filter(|l| l.trim_start().starts_with("#define")).any(|l| {
+            let mut parts = l.split_whitespace();
+            parts.next();
+            parts.next() == Some(name) && parts.next() == Some(value)
+        });
         assert!(in_header, "{name} must be {value} in aghoz.h");
 
-        let in_source = SOURCE
-            .lines()
-            .any(|l| l.contains(&format!("pub const {name}: i32 = {value};")));
+        let in_source =
+            SOURCE.lines().any(|l| l.contains(&format!("pub const {name}: i32 = {value};")));
         assert!(in_source, "{name} must be {value} in lib.rs");
     }
 }

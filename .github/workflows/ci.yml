@@ -152,13 +152,45 @@ jobs:
 
   # `core/` reads the same vectors.json the JavaScript runner does. Once the bindings
   # land (DECISIONS.md D3) this job is what proves every language agrees.
+  #
+  # The toolchain comes from rust-toolchain.toml rather than `@stable`, so this and a
+  # contributor's machine see the same lints.
   conformance-rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
       - name: conformance corpus (rust)
         run: cargo test --release
+
+      # Clippy was absent here for the whole life of the crate, and `not_unsafe_ptr_arg_deref`
+      # — deny-by-default, and the reason every ABI entry point is now `unsafe fn` — had
+      # been failing silently that entire time. `--all-targets` matters: the tests are
+      # where the ABI's contract is actually exercised.
+      - name: clippy (warnings are failures)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: formatting
+        run: cargo fmt --all -- --check
+      - name: docs build, and intra-doc links resolve
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Advisories, licences and duplicate versions. Three dependencies today, all first
+  # party or napi — which is exactly when this is cheap to add and easy to keep green.
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
 
   # The C ABI is the only place in the project with unsafe code, and a C ABI cannot be
   # written without it. Miri executes those paths looking for undefined behaviour —
@@ -171,7 +203,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      - run: cargo miri test -p aghoz-abi
+      # `rust-toolchain.toml` pins stable, which would override the nightly this job
+      # installs — and miri only exists on nightly.
+      - run: cargo +nightly miri test -p aghoz-abi
+        env:
+          RUSTUP_TOOLCHAIN: nightly
 
   # core/ must never acquire unsafe. If this fails, protocol logic has moved into the
   # ABI layer or the forbid attribute has been removed.

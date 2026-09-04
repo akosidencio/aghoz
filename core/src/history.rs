@@ -43,6 +43,11 @@ impl History {
         History { entries: VecDeque::new(), bytes: 0, max_bytes, last_trimmed: None }
     }
 
+    /// `self.bytes` is the sum of the retained frames' lengths, so neither the add nor
+    /// the subtract below can leave that range: a frame long enough to overflow a `usize`
+    /// could not have been allocated in the first place, and every subtraction pairs with
+    /// the addition made when that same frame was pushed.
+    #[allow(clippy::arithmetic_side_effects)]
     pub(crate) fn push(&mut self, entry: Entry) {
         self.bytes += entry.frame.len();
         self.entries.push_back(entry);
@@ -63,19 +68,12 @@ impl History {
         self.last_trimmed
     }
 
-    #[cfg(test)]
-    pub(crate) fn oldest(&self) -> Option<EventId> {
-        self.entries.front().map(|e| e.id)
-    }
-
     pub(crate) fn since<'a>(
         &'a self,
         cursor: EventId,
         topics: &'a [String],
     ) -> impl Iterator<Item = &'a Entry> + 'a {
-        self.entries
-            .iter()
-            .filter(move |e| e.id > cursor && topics.iter().any(|t| *t == e.topic))
+        self.entries.iter().filter(move |e| e.id > cursor && topics.contains(&e.topic))
     }
 
     pub(crate) fn len(&self) -> usize {
