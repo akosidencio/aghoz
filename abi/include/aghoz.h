@@ -52,7 +52,8 @@ extern "C" {
 #define AG_ERR_ORIGIN_EMPTY            -12   /* validator only; ag_publish never returns it */
 #define AG_ERR_ORIGIN_TOO_LONG         -13   /* 64 BYTES, not characters */
 #define AG_ERR_ORIGIN_CONTROL          -14
-#define AG_ERR_MALFORMED_ID            -15   /* not a canonical <ms>-<seq> */
+#define AG_ERR_MALFORMED_ID            -15   /* not a canonical <ms>-<seq>, or a half
+                                              above 2^53-1 */
 
 /* ag_note_buffer verdicts */
 #define AG_BUFFER_OK                     0
@@ -114,7 +115,13 @@ void ag_hub_free(ag_hub *hub);
  *
  * origin is the optional §6.0 field. Pass {NULL, 0} for absent; a zero length means the
  * same thing, because bindings routinely produce an empty string where a value was
- * missing and rejecting that would make the common case the hostile one. */
+ * missing and rejecting that would make the common case the hostile one.
+ *
+ * now_ms is MILLISECONDS. A clock in another unit is not silently accepted: anything
+ * that would put either half of the id above 2^53-1 — the range §2 narrowed to so that
+ * one cursor string names one event in every language — returns AG_ERR_MALFORMED_ID and
+ * assigns no id. Nanoseconds land two orders of magnitude past it, so the mistake shows
+ * up on the first call rather than as ids no JavaScript client can hold. */
 int32_t ag_publish(ag_hub *hub, uint64_t now_ms, ag_str topic, ag_str payload,
                    ag_str origin, ag_publish_result **out);
 
@@ -157,7 +164,9 @@ void ag_publish_result_free(ag_publish_result *result);
  * Splitting them across two FFI calls would let a publish land in between and leave a
  * real gap unreported, so the pieces are deliberately not offered separately.
  *
- * key may be empty to opt out of the per-key cap. has_cursor is 0 or 1. */
+ * key may be empty to opt out of the per-key cap. has_cursor is 0 or 1. The cursor
+ * arrives as two integers rather than as text, so it is the one id that never passes the
+ * parser: cursor_ms or cursor_seq above 2^53-1 returns AG_ERR_MALFORMED_ID. */
 int32_t ag_subscribe(ag_hub *hub, const ag_str *topics, size_t topic_count, ag_str key,
                      int32_t has_cursor, uint64_t cursor_ms, uint64_t cursor_seq,
                      ag_subscribe_result **out);

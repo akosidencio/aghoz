@@ -11,6 +11,8 @@ keywords.workspace = true
 categories.workspace = true
 readme = "../README.md"
 
+[lints]
+workspace = true
 [lib]
 crate-type = ["rlib"]
 

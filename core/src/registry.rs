@@ -35,26 +35,23 @@ impl Registry {
         self.by_key.get(key).copied().unwrap_or(0)
     }
 
-    pub(crate) fn add(&mut self, topics: Vec<String>, key: Option<String>) -> SubscriberId {
+    /// Registers a subscriber. `topics` must already be deduplicated — see [`dedupe`].
+    ///
+    /// `self.next += 1` cannot overflow: it advances once per subscribe, and a `u64`
+    /// exhausted at a million connections a second takes half a million years.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub(crate) fn add(&mut self, unique: Vec<String>, key: Option<String>) -> SubscriberId {
         // A recycled id lets a write scheduled for a closed subscriber land on whoever
         // inherited the number — a cross-tenant leak that would be near-impossible to
         // reproduce. So ids only ever move forward.
         let id = SubscriberId(self.next);
         self.next += 1;
 
-        // Duplicates would otherwise deliver an event twice to one socket, with
-        // identical ids, which no client-side dedupe can repair.
-        let mut unique: Vec<String> = Vec::with_capacity(topics.len());
-        for topic in topics {
-            if !unique.contains(&topic) {
-                unique.push(topic);
-            }
-        }
-
         for topic in &unique {
             self.by_topic.entry(topic.clone()).or_default().insert(id);
         }
         if let Some(k) = &key {
+            // One per live subscriber, so it is bounded by `self.next` above.
             *self.by_key.entry(k.clone()).or_insert(0) += 1;
         }
         self.subs.insert(id, Subscriber { topics: unique, key, queued: 0 });
@@ -78,6 +75,9 @@ impl Registry {
         }
         if let Some(k) = sub.key {
             match self.by_key.get_mut(&k) {
+                // Guarded at two or more, so this cannot underflow; the count reaching
+                // one is the removal that takes the entry out entirely.
+                #[allow(clippy::arithmetic_side_effects)]
                 Some(n) if *n > 1 => *n -= 1,
                 _ => {
                     self.by_key.remove(&k);
@@ -137,4 +137,19 @@ impl Registry {
     pub(crate) fn topic_count(&self) -> usize {
         self.by_topic.len()
     }
+}
+
+/// Removes repeated topics, keeping the order the caller asked for.
+///
+/// A duplicate would deliver one event to one socket twice, with the same id both times,
+/// which is the one shape of duplicate no client-side dedupe can repair — the second copy
+/// is indistinguishable from the first.
+pub(crate) fn dedupe(topics: Vec<String>) -> Vec<String> {
+    let mut unique: Vec<String> = Vec::with_capacity(topics.len());
+    for topic in topics {
+        if !unique.contains(&topic) {
+            unique.push(topic);
+        }
+    }
+    unique
 }

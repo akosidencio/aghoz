@@ -44,3 +44,21 @@ if (after === before) {
   writeFileSync(cargo, after)
   console.log(`  Cargo.toml workspace → ${version}`)
 }
+
+// The crates depend on `aghoz-core` by path AND version, because a path-only dependency
+// cannot be published. That version is a second place the number lives, so it moves with
+// the first one rather than being noticed at the next release.
+for (const manifest of ['abi/Cargo.toml', 'bindings/node/Cargo.toml']) {
+  const file = `${root}${manifest}`
+  const source = readFileSync(file, 'utf8')
+  const updated = source.replace(
+    /(aghoz-core = \{ path = "[^"]*", version = ")[^"]*(" \})/,
+    `$1${version}$2`,
+  )
+  if (updated === source) {
+    console.error(`  WARNING: ${manifest} aghoz-core dependency not found — left unchanged`)
+  } else {
+    writeFileSync(file, updated)
+    console.log(`  ${manifest} aghoz-core → ${version}`)
+  }
+}

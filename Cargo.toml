@@ -2,9 +2,19 @@
 members = ["core", "abi", "bindings/node"]
 resolver = "2"
 
+# An overflow in this codebase is a protocol violation, not a wrong number: an id that
+# wrapped would sort below the cursor a client already holds and read as "nothing new".
+# Debug already traps; without this, release quietly wraps instead — the same code with
+# two behaviours, and the dangerous one is what ships.
+[profile.release]
+overflow-checks = true
+
 [workspace.package]
 version = "0.4.2"
 edition = "2021"
+# The floor, not the pin — see rust-toolchain.toml. Raised by `napi-build`, which the
+# Node binding needs; `aghoz-core` on its own builds back to 1.82.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/thinkgrid-labs/aghoz"
 homepage = "https://github.com/thinkgrid-labs/aghoz#readme"
@@ -12,3 +22,34 @@ authors = ["thinkgrid-labs"]
 # crates.io ranks on these; five keywords is the registry's hard cap.
 keywords = ["sse", "server-sent-events", "realtime", "push", "streaming"]
 categories = ["network-programming", "web-programming", "asynchronous"]
+
+# One lint policy for every crate and every target, rather than a pile of crate-level
+# attributes that only apply to the lib. The security-relevant half — the casts, the
+# arithmetic, the panicking accessors — is the part worth the noise: a truncating cast and
+# an unchecked subtraction are how safe Rust still produces wrong answers, and this
+# codebase's job is deciding what a client did and did not receive.
+#
+# Where a lint fires on something provably in range, the site takes an `allow` with the
+# proof written next to it. That is the point: the proof gets written down.
+[workspace.lints.rust]
+missing_docs = "warn"
+unused_must_use = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+cast_precision_loss = "warn"
+mem_forget = "warn"
+undocumented_unsafe_blocks = "warn"
+missing_safety_doc = "warn"
+todo = "warn"
+dbg_macro = "warn"

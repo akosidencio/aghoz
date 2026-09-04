@@ -3,8 +3,8 @@
 use crate::codec::{encode_control, encode_frame};
 use crate::history::{Entry, History};
 use crate::id::{EventId, Sequence};
-use crate::registry::{Registry, SubscriberId};
 use crate::origin::{validate_origin, OriginError};
+use crate::registry::{dedupe, Registry, SubscriberId};
 use crate::topic::{validate_topic, TopicError};
 
 /// Limits, all of which §10 requires to exist even where they default to unbounded.
@@ -90,6 +90,18 @@ pub enum PublishError {
     Topic(TopicError),
     /// An origin violated §6.0.
     Origin(OriginError),
+    /// The id this publish would have been given falls outside §2's range.
+    ///
+    /// Reachable two ways, and the first is the one that will actually happen: a host
+    /// passing `now_ms` in the wrong unit. Nanoseconds land two orders of magnitude past
+    /// [`crate::MAX_ID_COMPONENT`], and the id that would be minted from them is one no
+    /// JavaScript client can hold exactly. The second is a sequence already at the bound
+    /// inside a millisecond that has not advanced — see `Sequence::next`.
+    ///
+    /// A refusal rather than a clamp: two publishes sharing an id is the one outcome
+    /// worse than a rejected publish, because client-side dedupe silently drops the
+    /// second one.
+    IdOutOfRange,
 }
 
 /// §8.2 — what to do about a subscriber's buffer depth.
@@ -149,7 +161,7 @@ impl Hub {
         // the sequence develops holes that look like lost events to anyone auditing it.
         validate(topic, origin)?;
 
-        let id = self.sequence.next(now_ms);
+        let id = self.sequence.next(now_ms).ok_or(PublishError::IdOutOfRange)?;
         Ok(self.record(id, topic, payload, origin))
     }
 
@@ -250,12 +262,11 @@ impl Hub {
             }
         }
 
-        let id = self.registry.add(topics, key);
-        let subscribed = self
-            .registry
-            .topics_of(id)
-            .expect("just registered")
-            .to_vec();
+        // Deduped here rather than read back out of the registry. Asking for the topics
+        // of the subscriber registered one line above cannot fail, but saying so needed an
+        // `expect`, and an `expect` that "cannot fail" is a claim no reader can check.
+        let subscribed = dedupe(topics);
+        let id = self.registry.add(subscribed.clone(), key);
 
         let (checkpoint, replay) = match cursor {
             None => (Checkpoint::Absent, Vec::new()),
@@ -355,11 +366,7 @@ impl Hub {
     /// Builds the `~gap` frame for a subscriber being dropped as a slow consumer.
     pub fn slow_consumer_frame(&self, id: SubscriberId) -> Vec<u8> {
         let topics = self.registry.topics_of(id).unwrap_or(&[]);
-        let list = topics
-            .iter()
-            .map(|t| json_string(t))
-            .collect::<Vec<_>>()
-            .join(",");
+        let list = topics.iter().map(|t| json_string(t)).collect::<Vec<_>>().join(",");
         encode_control("gap", &format!(r#"{{"reason":"slow-consumer","topics":[{list}]}}"#))
     }
 
@@ -402,6 +409,66 @@ impl Hub {
     }
 }
 
+/// Everything that reaches the wire is checked here, on every path that writes a frame.
+///
+/// Shared by `publish`, `append` and `encode` rather than repeated: these two rules are
+/// the injection defence (§3, §6.0), and a path that forgot one would be a forgery
+/// primitive reachable from application input.
+///
+/// An empty origin is absent, not invalid. Callers on the far side of a binding produce
+/// `""` for a missing value as a matter of course — `?? ''`, an unsent header — and
+/// rejecting that would make the common case the hostile one.
+fn validate(topic: &str, origin: Option<&str>) -> Result<(), PublishError> {
+    validate_topic(topic).map_err(PublishError::Topic)?;
+    if let Some(origin) = origin.filter(|o| !o.is_empty()) {
+        validate_origin(origin).map_err(PublishError::Origin)?;
+    }
+    Ok(())
+}
+
+/// JSON string escaping, so the core needs no serialisation dependency.
+///
+/// Escapes the control range as well as the two structural characters. It used to escape
+/// only `"` and `\\`, on the grounds that §3 forbids control characters in a topic — but
+/// the rule was enforced on the *subscribe* path and this function is reached from
+/// [`Hub::denied_frame`], which takes whatever list a binding hands it. A raw LF in a
+/// topic there did not forge a frame — `write_data_lines` splits it into another
+/// `data:` line — but the client rejoins those lines with a newline, so the payload
+/// arrived as JSON with a literal newline inside a string and `JSON.parse` threw. The
+/// `~denied` frame naming the refused topics was then the one frame the client could not
+/// read, which is a silent authorization failure.
+///
+/// Escaping rather than validating: this is the last thing between a string and the
+/// wire, and a total function here cannot be forgotten by a caller.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().saturating_add(2));
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            // The rest of C0. RFC 8259 forbids every one of them raw inside a string.
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[allow(
+    // See the note on the integration tests: a test asserts by panicking.
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,7 +478,7 @@ mod tests {
     }
 
     fn id(ms: u64, seq: u64) -> EventId {
-        EventId { ms, seq }
+        EventId::new(ms, seq).expect("test ids are inside §2's range")
     }
 
     #[test]
@@ -485,18 +552,12 @@ mod tests {
         let mut h = hub();
         // §3 and §6.0 are the injection defence. A path that skipped either would be a
         // forgery primitive reachable from whatever the backplane carries.
-        assert!(matches!(
-            h.append(id(1, 0), "~gap", "x", None),
-            Err(PublishError::Topic(_))
-        ));
+        assert!(matches!(h.append(id(1, 0), "~gap", "x", None), Err(PublishError::Topic(_))));
         assert!(matches!(
             h.append(id(1, 0), "t", "x", Some("bad\norigin")),
             Err(PublishError::Origin(_))
         ));
-        assert!(matches!(
-            h.encode(id(1, 0), "a\nb", "x", None),
-            Err(PublishError::Topic(_))
-        ));
+        assert!(matches!(h.encode(id(1, 0), "a\nb", "x", None), Err(PublishError::Topic(_))));
         assert!(matches!(
             h.encode(id(1, 0), "t", "x", Some("bad\norigin")),
             Err(PublishError::Origin(_))
@@ -606,39 +667,39 @@ mod tests {
         let bare = hub().encode(id(1000, 0), "t", "x", None).unwrap();
         assert_eq!(appended.frame, bare, "empty and absent must encode identically");
     }
-}
 
-/// Everything that reaches the wire is checked here, on every path that writes a frame.
-///
-/// Shared by `publish`, `append` and `encode` rather than repeated: these two rules are
-/// the injection defence (§3, §6.0), and a path that forgot one would be a forgery
-/// primitive reachable from application input.
-///
-/// An empty origin is absent, not invalid. Callers on the far side of a binding produce
-/// `""` for a missing value as a matter of course — `?? ''`, an unsent header — and
-/// rejecting that would make the common case the hostile one.
-fn validate(topic: &str, origin: Option<&str>) -> Result<(), PublishError> {
-    validate_topic(topic).map_err(PublishError::Topic)?;
-    if let Some(origin) = origin.filter(|o| !o.is_empty()) {
-        validate_origin(origin).map_err(PublishError::Origin)?;
+    #[test]
+    fn a_clock_outside_the_id_range_is_refused_not_emitted() {
+        let mut h = hub();
+        // Nanoseconds where §2 wants milliseconds. Minting the id anyway would put a
+        // number on the wire that every JavaScript client rounds to a different event.
+        assert_eq!(
+            h.publish(1_757_000_000_000_000_000, "t", "x", None).err(),
+            Some(PublishError::IdOutOfRange)
+        );
+        assert_eq!(h.cursor(), EventId::ZERO, "and it costs no id");
+        assert_eq!(h.history_len(), 0, "and records nothing");
     }
-    Ok(())
-}
 
-/// Minimal JSON string escaping, so the core needs no serialisation dependency.
-///
-/// Topics are already validated to contain no control characters (§3), so only the two
-/// structural characters can occur.
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            _ => out.push(c),
-        }
+    #[test]
+    fn a_denied_frame_stays_parseable_whatever_the_topics_hold() {
+        let h = hub();
+        // `denied_frame` takes whatever list a binding hands it — nothing on this path
+        // has been through §3. A raw LF used to reach the payload, where the client's
+        // rejoin turned it back into a newline inside a JSON string and `JSON.parse`
+        // threw on the one frame that names what was refused.
+        let frame = h.denied_frame(&[
+            "a\nb".to_string(),
+            "q\"uote".to_string(),
+            "tab\there".to_string(),
+            "bell\u{7}".to_string(),
+        ]);
+        let text = String::from_utf8(frame).expect("frames are utf-8");
+        assert_eq!(
+            text,
+            "event: ~denied\ndata: {\"topics\":[\"a\\nb\",\"q\\\"uote\",\"tab\\there\",\"bell\\u0007\"]}\n\n"
+        );
+        // One `data:` line, so the payload the client rejoins is the payload we wrote.
+        assert_eq!(text.matches("data: ").count(), 1);
     }
-    out.push('"');
-    out
 }

@@ -9,14 +9,22 @@
 //! Nothing here makes protocol decisions. It converts types, and everything else is a
 //! call into the core, so the conformance corpus still governs behaviour.
 
+// napi-derive expands each `#[napi]` item into registration glue — `from_napi_value`,
+// constructor shims — that carries no docs and is not this crate's surface. The lint
+// fires on the macro's output, at the macro's call site, where no scoped `allow` can
+// reach it. Every hand-written item here is documented; `core` and `abi` keep the
+// workspace rule, and `core` keeps its own `deny`.
+#![allow(missing_docs)]
+// Kept from before the workspace policy existed: `all` is a warning there, and this is
+// the one crate whose lints a contributor sees only through a `cargo build`.
 #![deny(clippy::all)]
 
-use napi::bindgen_prelude::*;
-use napi_derive::napi;
 use aghoz_core::{
     BufferVerdict, Checkpoint, EventId, Hub as CoreHub, HubConfig, OriginError, PublishError,
     SubscribeError, SubscriberId, TopicError,
 };
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
 
 /// Options mirroring `HubConfig`. Absent fields take the core's defaults.
 #[napi(object)]
@@ -42,14 +50,18 @@ pub struct JsPublish {
     /// The encoded frame, ready to write to a socket.
     pub frame: Buffer,
     /// Subscriber ids the frame should go to.
-    pub targets: Vec<u32>,
+    ///
+    /// `f64` rather than `u32`, for the reason [`Hub::subscribe`] gives: a subscriber id
+    /// is a u64 that only ever counts up, and truncating it to 32 bits eventually hands
+    /// two live sockets the same number.
+    pub targets: Vec<f64>,
 }
 
 /// What a subscribe produced.
 #[napi(object)]
 pub struct JsSubscribe {
     /// The registered subscriber.
-    pub id: u32,
+    pub id: f64,
     /// `"absent"`, `"echo"` or `"earliest"` — what the checkpoint header must say.
     pub checkpoint: String,
     /// Frames to replay, oldest first.
@@ -92,7 +104,80 @@ fn publish_message(e: PublishError) -> String {
             };
             format!("invalid-origin: {detail}")
         }
+        // Deliberately *not* one of the seam's tokens. Every other variant here is
+        // something the request asked for; this one is the server's own clock in the
+        // wrong unit, or an id space this process has spent. `core-native.ts` answers
+        // 500 for a message it does not recognise, which is the honest status for a
+        // fault the caller had no part in — see `asCoreError` there.
+        PublishError::IdOutOfRange => {
+            "id-out-of-range; nowMs must be milliseconds below 2^53-1".to_string()
+        }
     }
+}
+
+/// A subscriber id on its way out to JavaScript.
+///
+/// `f64`, never `u32`. The core issues these from a counter that only ever moves forward
+/// — `registry.rs` explains at length that a *recycled* id lets a write scheduled for a
+/// closed subscriber land on whoever inherited the number — and `as u32` reintroduced
+/// exactly that at 2^32 subscribes, where the handler's `connections` map would hand the
+/// new socket the old one's fan-out. An f64 holds every integer below 2^53 exactly, which
+/// is the same bound §2 already puts on an event id.
+// Lossless for every id a process can issue: ids count up from 1, and an f64 is exact
+// to 2^53 — the same bound §2 puts on an event id.
+#[allow(clippy::cast_precision_loss)]
+fn subscriber_to_js(id: SubscriberId) -> f64 {
+    id.0 as f64
+}
+
+/// A subscriber id arriving from JavaScript.
+///
+/// Anything that is not a whole number this process could have issued becomes `0`, which
+/// is the one id the registry never assigns — so it reports `unknown` rather than
+/// landing on a real subscriber.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn subscriber_from_js(id: f64) -> SubscriberId {
+    if !id.is_finite() || id < 1.0 || id.fract() != 0.0 {
+        return SubscriberId(0);
+    }
+    // Positive, finite and whole by the guard above.
+    SubscriberId(id as u64)
+}
+
+/// A JavaScript timestamp on its way into the core.
+///
+/// `Date.now()` is a whole, finite, positive number of milliseconds. `as u64` alone maps
+/// NaN to 0 and a negative to 0, either of which would quietly assign `0-n` — an id below
+/// every cursor a client holds, which reads as "nothing new" forever. The core rejects
+/// the *upper* half of this range on its own; this is the half a cast cannot express.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn millis_from_js(now_ms: f64) -> Option<u64> {
+    if !now_ms.is_finite() || now_ms < 0.0 || now_ms.fract() != 0.0 {
+        return None;
+    }
+    // Positive, finite and whole by the guard above; the core rejects the rest.
+    Some(now_ms as u64)
+}
+
+/// A byte count arriving from JavaScript.
+///
+/// §8.2 is about how far behind a subscriber is, so the only wrong answer is one that
+/// reads *better* than the truth. `as usize` alone maps NaN and a negative to zero —
+/// "perfectly caught up" — and a number past `usize::MAX` to something arbitrary.
+/// Clamping keeps a nonsense report from looking like a healthy one.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn bytes_from_js(bytes: f64) -> usize {
+    if bytes.is_nan() || bytes <= 0.0 {
+        return 0;
+    }
+    // `usize::MAX as f64` rounds up, so the comparison is conservative — a value at the
+    // very top clamps rather than wrapping, which is the direction that cannot lie.
+    #[allow(clippy::cast_precision_loss)]
+    if bytes >= usize::MAX as f64 {
+        return usize::MAX;
+    }
+    // Positive, finite and below `usize::MAX` by the guards above.
+    bytes as usize
 }
 
 /// The in-process hub.
@@ -140,12 +225,18 @@ impl Hub {
         // Empty means absent, matching the ABI and the TypeScript core: JavaScript
         // callers produce `''` wherever a value was missing.
         let origin = origin.filter(|o| !o.is_empty());
-        match self.inner.publish(now_ms as u64, &topic, &payload, origin.as_deref()) {
+        let Some(now_ms) = millis_from_js(now_ms) else {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "id-out-of-range; nowMs must be a whole, positive number of milliseconds",
+            ));
+        };
+        match self.inner.publish(now_ms, &topic, &payload, origin.as_deref()) {
             Err(e) => Err(Error::new(Status::InvalidArg, publish_message(e))),
             Ok(effect) => Ok(JsPublish {
                 id: effect.id.to_string(),
                 frame: effect.frame.into(),
-                targets: effect.targets.iter().map(|s| s.0 as u32).collect(),
+                targets: effect.targets.iter().map(|s| subscriber_to_js(*s)).collect(),
             }),
         }
     }
@@ -175,7 +266,7 @@ impl Hub {
             Ok(effect) => Ok(JsPublish {
                 id: effect.id.to_string(),
                 frame: effect.frame.into(),
-                targets: effect.targets.iter().map(|s| s.0 as u32).collect(),
+                targets: effect.targets.iter().map(|s| subscriber_to_js(*s)).collect(),
             }),
         }
     }
@@ -225,10 +316,7 @@ impl Hub {
                 // A malformed cursor must not be treated as "no cursor": the client
                 // would believe it resumed and would never be told otherwise.
                 None => {
-                    return Err(Error::new(
-                        Status::InvalidArg,
-                        format!("malformed-cursor: {raw}"),
-                    ))
+                    return Err(Error::new(Status::InvalidArg, format!("malformed-cursor: {raw}")))
                 }
             },
         };
@@ -245,7 +333,7 @@ impl Hub {
                 Err(Error::new(Status::GenericFailure, "max-connections-per-key"))
             }
             Ok(effect) => Ok(JsSubscribe {
-                id: effect.id.0 as u32,
+                id: subscriber_to_js(effect.id),
                 checkpoint: match effect.checkpoint {
                     Checkpoint::Absent => "absent".to_string(),
                     Checkpoint::Echo(_) => "echo".to_string(),
@@ -262,10 +350,9 @@ impl Hub {
     /// What the Node handler uses, because `res.writableLength` is exactly this and the
     /// socket is a better authority than any accounting kept alongside it.
     #[napi]
-    pub fn note_buffer(&mut self, subscriber: u32, queued_bytes: f64) -> String {
+    pub fn note_buffer(&mut self, subscriber: f64, queued_bytes: f64) -> String {
         verdict_name(
-            self.inner
-                .note_buffer(SubscriberId(subscriber as u64), queued_bytes as usize),
+            self.inner.note_buffer(subscriber_from_js(subscriber), bytes_from_js(queued_bytes)),
         )
     }
 
@@ -274,20 +361,20 @@ impl Hub {
     /// Node does not need this — it is here so the corpus can drive the same rule through
     /// this binding that a ctypes or cgo binding will drive through the C ABI.
     #[napi]
-    pub fn note_sent(&mut self, subscriber: u32, bytes: f64) -> String {
-        verdict_name(self.inner.note_sent(SubscriberId(subscriber as u64), bytes as usize))
+    pub fn note_sent(&mut self, subscriber: f64, bytes: f64) -> String {
+        verdict_name(self.inner.note_sent(subscriber_from_js(subscriber), bytes_from_js(bytes)))
     }
 
     /// Reports that `bytes` previously passed to `noteSent` have drained.
     #[napi]
-    pub fn note_flushed(&mut self, subscriber: u32, bytes: f64) -> String {
-        verdict_name(self.inner.note_flushed(SubscriberId(subscriber as u64), bytes as usize))
+    pub fn note_flushed(&mut self, subscriber: f64, bytes: f64) -> String {
+        verdict_name(self.inner.note_flushed(subscriber_from_js(subscriber), bytes_from_js(bytes)))
     }
 
     /// Removes a subscriber. Idempotent.
     #[napi]
-    pub fn remove(&mut self, subscriber: u32) -> bool {
-        self.inner.remove(SubscriberId(subscriber as u64))
+    pub fn remove(&mut self, subscriber: f64) -> bool {
+        self.inner.remove(subscriber_from_js(subscriber))
     }
 
     /// The newest assigned id, or `0-0`.
@@ -298,24 +385,23 @@ impl Hub {
 
     /// Open subscribers.
     #[napi]
-    pub fn connection_count(&self) -> u32 {
-        self.inner.connection_count() as u32
+    #[allow(clippy::cast_precision_loss)]
+    pub fn connection_count(&self) -> f64 {
+        // Exact for every count a process can actually hold; `as u32` was not, and a
+        // wrapped connection count is a metric that reads healthy while it is not.
+        self.inner.connection_count() as f64
     }
 
     /// A `~gap` frame for a subscriber that fell behind.
     #[napi]
-    pub fn slow_consumer_frame(&self, subscriber: u32) -> Buffer {
-        self.inner
-            .slow_consumer_frame(SubscriberId(subscriber as u64))
-            .into()
+    pub fn slow_consumer_frame(&self, subscriber: f64) -> Buffer {
+        self.inner.slow_consumer_frame(subscriber_from_js(subscriber)).into()
     }
 
     /// A `~gap` frame for a cursor history no longer reaches.
     #[napi]
-    pub fn truncated_frame(&self, subscriber: u32) -> Buffer {
-        self.inner
-            .truncated_frame(SubscriberId(subscriber as u64))
-            .into()
+    pub fn truncated_frame(&self, subscriber: f64) -> Buffer {
+        self.inner.truncated_frame(subscriber_from_js(subscriber)).into()
     }
 
     /// A `~denied` frame naming refused topics.
@@ -376,6 +462,10 @@ pub fn compare_ids(a: String, b: String) -> Result<i32> {
 }
 
 /// Encodes a frame directly, for the conformance runner.
+///
+/// Throws for an id outside §2's range rather than encoding one: this is the only entry
+/// point that takes the two halves as numbers, and it would otherwise be the way to put
+/// an id on the wire that no client can parse back.
 #[napi]
 pub fn encode_frame(
     ms: f64,
@@ -383,12 +473,10 @@ pub fn encode_frame(
     topic: String,
     payload: String,
     origin: Option<String>,
-) -> Buffer {
-    aghoz_core::encode_frame(
-        EventId { ms: ms as u64, seq: seq as u64 },
-        &topic,
-        &payload,
-        origin.as_deref(),
-    )
-    .into()
+) -> Result<Buffer> {
+    let id = millis_from_js(ms)
+        .zip(millis_from_js(seq))
+        .and_then(|(ms, seq)| EventId::new(ms, seq))
+        .ok_or_else(|| Error::new(Status::InvalidArg, format!("malformed-cursor: {ms}-{seq}")))?;
+    Ok(aghoz_core::encode_frame(id, &topic, &payload, origin.as_deref()).into())
 }
