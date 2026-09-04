@@ -33,6 +33,12 @@ importers:
         specifier: ^0.25.0
         version: 0.25.12
 
+  examples/outbox-sqlite:
+    dependencies:
+      '@aghoz/server':
+        specifier: workspace:*
+        version: link:../../packages/server
+
   packages/client:
     devDependencies:
       '@aghoz/server':

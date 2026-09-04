@@ -50,8 +50,11 @@
 import {
   Client,
   type ClientState,
+  type CutoverListener,
+  type EventMeta,
   type GapReason,
   type Handler,
+  type HandlerErrorListener,
   type RequestHeaders,
 } from './client.js'
 import { compareIds } from './parser.js'
@@ -69,6 +72,8 @@ export interface AghozClient {
   readonly rejected: boolean
   subscribe(topic: string, handler: Handler): () => void
   onGap(listener: (reason: GapReason, topics: readonly string[]) => void): () => void
+  onCutover(listener: CutoverListener): () => void
+  onHandlerError(listener: HandlerErrorListener): () => void
   onStateChange(listener: (state: ClientState) => void): () => void
   reconnect(): void
   close(): void
@@ -95,6 +100,19 @@ export interface SharedClientOptions {
   initialCursor?: string
   onGap?: (reason: GapReason, topics: readonly string[]) => void
   onDenied?: (topics: readonly string[]) => void
+  /**
+   * §9.3 — fires in every tab when the shared connection reopens carrying a topic its
+   * cursor was never a baseline for.
+   *
+   * The leader decides, because the leader owns the connection, and the answer is
+   * broadcast rather than recomputed per tab: a follower does not know when the shared
+   * stream reopened or what set it reopened with. A tab that had nothing to do with
+   * the widening hears it too and invalidates a query it could have kept — one
+   * refetch, on a topic somebody in this browser just started watching.
+   */
+  onCutover?: CutoverListener
+  /** §9.2 — a handler in *this* tab threw after the cursor had advanced past it. */
+  onHandlerError?: HandlerErrorListener
   onError?: (error: unknown) => void
   onStateChange?: (state: ClientState) => void
   originId?: string
@@ -139,6 +157,7 @@ type FromLeader =
   | { t: 'event'; id: string; topic: string; data: string; origin?: string }
   | { t: 'state'; state: ClientState; rejected: boolean }
   | { t: 'gap'; reason: GapReason; topics: string[] }
+  | { t: 'cutover'; topics: string[]; cursor?: string }
   | { t: 'denied'; topics: string[] }
 
 type Message = FromFollower | FromLeader
@@ -150,6 +169,8 @@ export class SharedClient implements AghozClient {
   readonly #channel: Channel
   readonly #handlers = new Map<string, Set<Handler>>()
   readonly #gapListeners = new Set<(reason: GapReason, topics: readonly string[]) => void>()
+  readonly #cutoverListeners = new Set<CutoverListener>()
+  readonly #handlerErrorListeners = new Set<HandlerErrorListener>()
   readonly #stateListeners = new Set<(state: ClientState) => void>()
 
   /** Set once this tab wins the lock. Undefined while it is a follower. */
@@ -259,6 +280,22 @@ export class SharedClient implements AghozClient {
     }
   }
 
+  /** §9.3 — see `Client.onCutover`. Broadcast by the leader, fired in every tab. */
+  onCutover(listener: CutoverListener): () => void {
+    this.#cutoverListeners.add(listener)
+    return () => {
+      this.#cutoverListeners.delete(listener)
+    }
+  }
+
+  /** §9.2 — see `Client.onHandlerError`. Local to this tab; handlers are not shared. */
+  onHandlerError(listener: HandlerErrorListener): () => void {
+    this.#handlerErrorListeners.add(listener)
+    return () => {
+      this.#handlerErrorListeners.delete(listener)
+    }
+  }
+
   onStateChange(listener: (state: ClientState) => void): () => void {
     this.#stateListeners.add(listener)
     return () => {
@@ -326,6 +363,10 @@ export class SharedClient implements AghozClient {
       onGap: (reason, topics) => {
         this.#send({ t: 'gap', reason, topics: [...topics] })
         this.#fireGap(reason, topics)
+      },
+      onCutover: (topics, cursor) => {
+        this.#send({ t: 'cutover', topics: [...topics], ...(cursor !== undefined && { cursor }) })
+        this.#fireCutover(topics, cursor)
       },
       onDenied: (topics) => {
         this.#send({ t: 'denied', topics: [...topics] })
@@ -451,6 +492,9 @@ export class SharedClient implements AghozClient {
       case 'gap':
         this.#fireGap(message.reason, message.topics)
         return
+      case 'cutover':
+        this.#fireCutover(message.topics, message.cursor)
+        return
       case 'denied':
         this.#options.onDenied?.(message.topics)
         return
@@ -515,7 +559,9 @@ export class SharedClient implements AghozClient {
       try {
         handler(data, meta)
       } catch (error) {
-        this.#options.onError?.(error)
+        // §9.2 — the cursor above has already moved past this event and no reconnect
+        // will bring it back, so the failure has to name the topic it belongs to.
+        this.#fireHandlerError(error, meta)
       }
     }
   }
@@ -533,6 +579,29 @@ export class SharedClient implements AghozClient {
         this.#options.onError?.(error)
       }
     }
+  }
+
+  #fireCutover(topics: readonly string[], cursor: string | undefined): void {
+    this.#options.onCutover?.(topics, cursor)
+    for (const listener of [...this.#cutoverListeners]) {
+      try {
+        listener(topics, cursor)
+      } catch (error) {
+        this.#options.onError?.(error)
+      }
+    }
+  }
+
+  #fireHandlerError(error: unknown, meta: EventMeta): void {
+    this.#options.onHandlerError?.(error, meta)
+    for (const listener of [...this.#handlerErrorListeners]) {
+      try {
+        listener(error, meta)
+      } catch (listenerError) {
+        this.#options.onError?.(listenerError)
+      }
+    }
+    this.#options.onError?.(error)
   }
 
   #setState(state: ClientState): void {

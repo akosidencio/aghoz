@@ -19,8 +19,10 @@ import {
   type Client,
   type ClientOptions,
   type ClientState,
+  type CutoverListener,
   type EventMeta,
   type GapReason,
+  type HandlerErrorListener,
   type RequestHeaders,
 } from '@aghoz/client'
 
@@ -42,6 +44,23 @@ export interface AghozProviderProps {
    * handler failures are outside this signal.
    */
   onGap?: (reason: GapReason, topics: readonly string[]) => void
+  /**
+   * PROTOCOL.md §9.3 — a topic mounted late and the replacement stream has opened, but
+   * the cursor it resumed from was never a baseline for that topic.
+   *
+   * Read an authoritative snapshot for the topics named here. `@aghoz/react-query`
+   * wires this for you; without a cache adapter it is the application's to handle, and
+   * it is the one signal a lazily mounted subscription cannot do without.
+   */
+  onCutover?: CutoverListener
+  /**
+   * §9.2 — a subscriber callback threw, cursor already past the event.
+   *
+   * `useTopic` and `useTopicReducer` reach this through a parse failure. State folded
+   * from payloads is now behind with nothing else to say so, so treat it the way you
+   * treat a gap: refetch the topic named in `meta`.
+   */
+  onHandlerError?: HandlerErrorListener
   onDenied?: (topics: readonly string[]) => void
   onError?: (error: unknown) => void
   /** Fetch credentials mode. Use `include` for cross-origin cookie authentication. */
@@ -60,6 +79,8 @@ export function AghozProvider(props: AghozProviderProps): ReactNode {
     url,
     initialCursor,
     onGap,
+    onCutover,
+    onHandlerError,
     onDenied,
     onError,
     credentials,
@@ -72,14 +93,16 @@ export function AghozProvider(props: AghozProviderProps): ReactNode {
   // Callbacks live behind a ref so that a parent re-render with new inline functions
   // does not tear down the connection. Reconnecting because a component re-rendered
   // would discard the cursor and cause exactly the loss this library reports.
-  const callbacks = useRef({ onGap, onDenied, onError })
-  callbacks.current = { onGap, onDenied, onError }
+  const callbacks = useRef({ onGap, onCutover, onHandlerError, onDenied, onError })
+  callbacks.current = { onGap, onCutover, onHandlerError, onDenied, onError }
 
   const client = useMemo(() => {
     if (provided !== undefined) return provided
     const options: ClientOptions = {
       url,
       onGap: (reason, topics) => callbacks.current.onGap?.(reason, topics),
+      onCutover: (topics, cursor) => callbacks.current.onCutover?.(topics, cursor),
+      onHandlerError: (error, meta) => callbacks.current.onHandlerError?.(error, meta),
       onDenied: (topics) => callbacks.current.onDenied?.(topics),
       onError: (error) => callbacks.current.onError?.(error),
       ...(initialCursor !== undefined && { initialCursor }),
@@ -211,4 +234,12 @@ export function useTopicReducer<S, T = unknown>(
   return state
 }
 
-export type { Client, ClientState, GapReason, EventMeta, RequestHeaders } from '@aghoz/client'
+export type {
+  Client,
+  ClientState,
+  GapReason,
+  EventMeta,
+  RequestHeaders,
+  CutoverListener,
+  HandlerErrorListener,
+} from '@aghoz/client'

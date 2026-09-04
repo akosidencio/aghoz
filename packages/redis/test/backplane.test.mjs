@@ -521,3 +521,106 @@ test('a publish with no origin crosses the backplane without one', options(), as
     await a.close()
   }
 })
+
+// ------------------------------------------------------------ §2.4 feed scopes
+
+const SCOPE_A = `test:${process.pid}:a`
+const SCOPE_B = `test:${process.pid}:b`
+
+test('two scopes are two sequences, and neither sees the other', options(), async () => {
+  // The default is one key for everything: one retention budget, one replay scan, every
+  // tenant's events in every other tenant's log. A scope is the whole partition model —
+  // §2.4 chose separate sequences over a cursor vector — so the first thing it has to be
+  // is actually separate.
+  const a = await node(undefined, {}, { scope: SCOPE_A })
+  const b = await node(undefined, {}, { scope: SCOPE_B })
+  try {
+    const sa = await openStream(a.base, 'topics=orders')
+    const sb = await openStream(b.base, 'topics=orders')
+
+    await sa.waitFor((f) => f === ':ok\n\n')
+    await sb.waitFor((f) => f === ':ok\n\n')
+
+    await a.hub.publish('orders', { id: 1 })
+    await sa.waitFor((f) => f.startsWith('id: '))
+    await new Promise((r) => setTimeout(r, 300))
+    assert.equal(sb.data().length, 0, 'a scope is not a filter on a shared log')
+
+    sa.close()
+    sb.close()
+  } finally {
+    await a.close()
+    await b.close()
+  }
+})
+
+test('a retention budget is spent per scope, not shared across tenants', options(), async () => {
+  // The reason to reach for a scope at all. With one key, the loudest tenant decides how
+  // far back the quietest one can resume from: `maxLen` is a count over everybody's
+  // events, so a burst on one tenant evicts another's history and turns their next
+  // reconnect into a refetch they did nothing to deserve.
+  const a = await node(undefined, {}, { scope: SCOPE_A, maxLen: 2 })
+  const b = await node(undefined, {}, { scope: SCOPE_B, maxLen: 2 })
+  try {
+    // One quiet event on B, and the cursor a client would be resuming from.
+    const first = await b.hub.publish('orders', { id: 1 })
+    const quietCursor = first.id
+
+    // A burst on A, well past both budgets.
+    for (let i = 0; i < 12; i++) await a.hub.publish('orders', { n: i })
+
+    const resumed = await openStream(b.base, `topics=orders&last_event_id=${quietCursor}`)
+    assert.notEqual(
+      resumed.res.headers.get('last-event-id-checkpoint'),
+      'earliest',
+      "another tenant's burst must not evict this one's history",
+    )
+    resumed.close()
+  } finally {
+    await a.close()
+    await b.close()
+  }
+})
+
+test('scope and key together are rejected rather than silently ranked', options(), async () => {
+  await assert.rejects(
+    createRedisBackplane({ redis: client(), subscriber: client(), key: 'x', scope: 'y' }),
+    /either key or scope/,
+  )
+})
+
+test('an unusable scope is rejected at construction', options(), async () => {
+  // A scope becomes a key segment, so the characters that break key handling have to be
+  // refused where the mistake is visible. `*` is the sharp one: operators find these
+  // streams with `SCAN MATCH aghoz:*`, and a scope carrying a glob makes one tenant's
+  // pattern match another's stream.
+  for (const scope of ['', ' ', 'a b', 'a*', 'a?', 'a[b]', 'a\nb', 'x'.repeat(129)]) {
+    await assert.rejects(
+      createRedisBackplane({ redis: client(), subscriber: client(), scope }),
+      /scope/,
+      `must reject ${JSON.stringify(scope)}`,
+    )
+  }
+})
+
+test('a second backplane on one key in one process is warned about', options(), async () => {
+  // Two hubs on one stream both read every event on it, so each fans the other's topics
+  // out to its own subscribers. Nothing errors and authorization still holds — the scope
+  // has simply stopped separating anything, which is the failure that needs saying out
+  // loud.
+  const warnings = []
+  const original = console.warn
+  console.warn = (message) => warnings.push(String(message))
+  const first = await node(undefined, {}, { scope: SCOPE_A })
+  let second
+  try {
+    second = await node(undefined, {}, { scope: SCOPE_A })
+    assert.equal(warnings.length, 1, 'exactly one warning, on the second')
+    assert.match(warnings[0], /second backplane on stream key/)
+    assert.match(warnings[0], /§2\.4/)
+  } finally {
+    console.warn = original
+    await first.close()
+    if (second !== undefined) await second.close()
+  }
+})

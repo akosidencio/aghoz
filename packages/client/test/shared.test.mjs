@@ -683,3 +683,67 @@ test('a real navigator.locks is picked up without being passed in', async () => 
     else delete globalThis.navigator
   }
 })
+
+// ------------------------------------------------------------- §9.3 cutover
+
+test('a topic a second tab adds late is reported as a cutover in every tab', async () => {
+  // The leader owns the connection, so the leader is the only one that knows when the
+  // shared stream reopened and with what set. It decides and broadcasts; a follower that
+  // recomputed this from its own view would be guessing.
+  const s = await boot()
+  const cutovers = [[], []]
+  const { tabs, closeAll } = openTabs(2, s.url, {
+    client: { initialCursor: s.hub.cursor() },
+  })
+  try {
+    tabs.forEach((tab, i) => tab.onCutover((topics) => cutovers[i].push([...topics])))
+
+    const seen = []
+    tabs[0].subscribe('a', (data) => seen.push(data))
+    await until(() => tabs.some((t) => t.state === 'open'), 3000, 'open')
+
+    // Moves the shared cursor while nobody is watching `b`.
+    await s.hub.publish('b', { n: 11 })
+    await s.hub.publish('a', { n: 12 })
+    await until(() => seen.length === 1, 3000, 'a delivered')
+
+    tabs[1].subscribe('b', () => {})
+    await until(() => cutovers[0].length === 1 && cutovers[1].length === 1, 3000, 'cutover')
+
+    assert.deepEqual(cutovers[0], [['b']], 'the leader reports it')
+    assert.deepEqual(cutovers[1], [['b']], 'and every tab hears it, including the one that asked')
+  } finally {
+    closeAll()
+    await s.close()
+  }
+})
+
+test('a handler that throws in one tab is reported with its topic, in that tab only', async () => {
+  // §9.2. Handlers are per tab — the leader forwards frames, not callbacks — so this one
+  // is deliberately not broadcast: a tab that folded the event successfully has nothing
+  // to recover from.
+  const s = await boot()
+  const { tabs, closeAll } = openTabs(2, s.url, {
+    client: { initialCursor: s.hub.cursor() },
+  })
+  try {
+    const failures = [[], []]
+    tabs.forEach((tab, i) => tab.onHandlerError((_error, meta) => failures[i].push(meta.topic)))
+
+    const ok = []
+    tabs[0].subscribe('t', () => {
+      throw new Error('fold failed')
+    })
+    tabs[1].subscribe('t', (data) => ok.push(data))
+    await until(() => tabs.some((t) => t.state === 'open'), 3000, 'open')
+
+    await s.hub.publish('t', { n: 1 })
+    await until(() => failures[0].length === 1 && ok.length === 1, 3000, 'delivery')
+
+    assert.deepEqual(failures[0], ['t'])
+    assert.deepEqual(failures[1], [], 'the tab whose handler succeeded hears nothing')
+  } finally {
+    closeAll()
+    await s.close()
+  }
+})

@@ -62,8 +62,30 @@ export interface RedisBackplaneOptions {
    * Delete the two together: a floor left behind by a deleted stream describes history
    * that no longer exists, which costs a false gap rather than a missed one, but a stream
    * rebuilt under a name whose floor was deleted has nothing to vouch with.
+   *
+   * Mutually exclusive with `scope`, which is the same setting with a name that says
+   * what choosing it means.
    */
   key?: string
+  /**
+   * PROTOCOL.md §2.4 — the feed scope this backplane serves.
+   *
+   * The stream key becomes `aghoz:<scope>:events`, and that is the entire mechanism:
+   * **one scope is one sequence**, with its own ids, its own `maxLen` retention budget
+   * and its own replay scan. Partitioning happens here, by running a hub per scope, and
+   * not inside a cursor — §2.4 says why a cursor vector was rejected.
+   *
+   * Reach for it when one stream is doing work for tenants that have nothing to do with
+   * each other. The default single key is one retention budget shared by everybody, so
+   * the loudest tenant decides how far back the quietest one can resume from, and every
+   * reconnect scans a log that is mostly other people's events.
+   *
+   * The cost is that a cursor is only meaningful inside its own scope. Nothing on the
+   * wire distinguishes one scope's ids from another's, so a cursor carried across
+   * scopes is silently interpreted against the wrong sequence — mount each scope on its
+   * own path, and stamp §5's `event-cursor` from the hub that owns it.
+   */
+  scope?: string
   /**
    * Approximate cap on retained events — the shared equivalent of `maxHistoryBytes`.
    *
@@ -118,12 +140,58 @@ interface Floor {
   readonly id: string
 }
 
+/**
+ * §2.4 — which scope names are usable as a key segment.
+ *
+ * Printable ASCII without spaces, and without the glob metacharacters `* ? [ ]`: an
+ * operator finds these keys with `SCAN MATCH aghoz:*`, and a scope carrying a `*` makes
+ * one tenant's pattern match another's stream. 128 bytes is well past any tenant id and
+ * short enough that the key stays readable in `redis-cli`.
+ */
+function assertScope(scope: string): void {
+  const bytes = new TextEncoder().encode(scope).length
+  if (bytes === 0 || bytes > 128) {
+    throw new TypeError(`aghoz: scope must be 1-128 bytes, got ${bytes}`)
+  }
+  for (const char of scope) {
+    const code = char.codePointAt(0) ?? 0
+    if (code <= 0x20 || code >= 0x7f || '*?[]'.includes(char)) {
+      throw new TypeError(`aghoz: scope contains an unusable character: ${JSON.stringify(char)}`)
+    }
+  }
+}
+
+/**
+ * Stream keys this process already has a backplane on.
+ *
+ * Two backplanes on one key inside one process is a copy-paste, and a quiet one: both
+ * hubs read every event on the stream, so each one fans out the other's topics to its
+ * own subscribers. Authorization still holds — every subscriber asked for its topics —
+ * but a scope that exists to keep tenants apart has stopped doing it, and nothing errors.
+ */
+const keysInUse = new Map<string, number>()
+
 export async function createRedisBackplane(
   options: RedisBackplaneOptions,
 ): Promise<Backplane> {
   const { redis, subscriber } = options
-  const key = options.key ?? 'aghoz:events'
+  if (options.key !== undefined && options.scope !== undefined) {
+    throw new TypeError('aghoz: pass either key or scope, not both — they name the same thing')
+  }
+  if (options.scope !== undefined) assertScope(options.scope)
+  const key =
+    options.key ?? (options.scope === undefined ? 'aghoz:events' : `aghoz:${options.scope}:events`)
   const floorKey = `${key}:floor`
+
+  const inUse = keysInUse.get(key) ?? 0
+  if (inUse > 0) {
+    console.warn(
+      `aghoz: a second backplane on stream key "${key}" in this process. Both hubs will ` +
+        'receive every event on it, so two feed scopes sharing a key are not separated ' +
+        '(PROTOCOL.md §2.4). Give each scope its own scope or key.',
+    )
+  }
+  keysInUse.set(key, inUse + 1)
   const maxLen = options.maxLen ?? 10_000
   const blockMs = options.blockMs ?? 5_000
   const maxReplay = options.maxReplay ?? 1_000
@@ -322,6 +390,11 @@ export async function createRedisBackplane(
     async close() {
       if (!running) return
       running = false
+      // Released here rather than left behind, so a test or a process that recreates a
+      // backplane on the same key does not accumulate a warning it cannot act on.
+      const held = keysInUse.get(key) ?? 0
+      if (held <= 1) keysInUse.delete(key)
+      else keysInUse.set(key, held - 1)
       // The reader may be parked in a BLOCK; disconnect is what interrupts it.
       subscriber.disconnect?.()
       await subscriber.quit?.().catch(() => {})

@@ -34,8 +34,9 @@
   "license": "MIT OR Apache-2.0",
   "scripts": {
     "build": "pnpm -r build",
-    "test": "pnpm -r test && node scripts/check-invariants.mjs && pnpm conformance:http && node scripts/smoke-example.mjs",
+    "test": "pnpm -r test && node scripts/check-invariants.mjs && pnpm conformance:client && pnpm conformance:http && node scripts/smoke-example.mjs",
     "conformance": "node conformance/runner.mjs ./packages/server/dist/conformance-adapter.js",
+    "conformance:client": "node conformance/client/runner.mjs ./packages/client/dist/conformance-adapter.js",
     "conformance:http": "node conformance/http/runner.mjs \"node conformance/http/adapters/node/app.mjs\"",
     "conformance:http:bun": "node conformance/http/runner.mjs \"bun conformance/http/adapters/node/app.mjs\"",
     "smoke:bun:nest": "bun packages/nest/bun-smoke.mjs",

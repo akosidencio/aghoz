@@ -687,8 +687,12 @@ persistent shared history.
 
 **`publish` is not transactional with your database write.** A crash between the two, an
 ignored rejected promise, or a forgotten call loses the event with no record that it
-existed. `onGap` cannot report an event the hub never accepted. If you truly cannot lose
-an event, use a transactional outbox or CDC and treat direct `hub.publish()` as the
+existed. `onGap` cannot report an event the hub never accepted, because from the hub's
+point of view nothing happened: the stream stays open, the checkpoint stays clean, and
+the UI is confidently missing one row. If you truly cannot lose an event, put a
+transactional outbox or CDC in front of `publish` — [docs/OUTBOX.md](./docs/OUTBOX.md)
+is the pattern, with a runnable, tested version in
+[examples/outbox-sqlite](./examples/outbox-sqlite). Direct `hub.publish()` stays the
 low-ceremony path rather than the durable one.
 
 **Your service worker can buffer the stream.** A worker doing
@@ -710,19 +714,21 @@ measure anything. If your users keep many tabs open,
 changed topic set means a new connection carrying the current cursor. Mounts inside one
 render pass are debounced into one connection; churning topics on every render is not.
 
-**A cursor only covers the topic set that produced it.** A global cursor cannot prove
-that initial state for a lazily added topic is current: another topic may advance the
-cursor past an event the new topic needed before the replacement connection opens. Until
-the pre-1.0 cutover contract is implemented, fetch or invalidate a newly added topic
-after its replacement stream opens; do not begin a client-side fold for a lazy topic from
-an earlier global cursor. Initial page topics stamped with the bootstrap cursor are not
-affected.
+**A cursor only covers the topic set that produced it.** A cursor cannot prove that
+initial state for a lazily added topic is current: another topic may advance the cursor
+past an event the new topic needed, before the replacement connection opens. The client
+now knows this and says so — `onCutover` fires with the topics that opened without a
+baseline, *after* their stream is open, and `@aghoz/react-query` invalidates them for
+you. Without a cache adapter, refetch the topics it names. Topics mounted in the first
+render pass share the bootstrap cursor and are never reported. PROTOCOL.md §9.3.
 
 **Received is not processed.** The client advances its cursor before invoking handlers so
-one broken component cannot block or replay the whole shared stream. A handler that
-throws is reported through `onError`, not retried. Invalidation handlers naturally
-recover by fetching authoritative state; payload reducers should catch parse/reducer
-errors and invalidate too.
+one broken component cannot block or replay the whole shared stream — which means an
+event whose handler threw is never delivered again. `onHandlerError(error, meta)` reports
+it with the topic and id, alongside the plain `onError`. Invalidation handlers recover
+naturally by fetching authoritative state; `@aghoz/react-query`'s folding hook
+invalidates on a failed parse or update and re-throws so the failure is still reported.
+A fold of your own should do the same. PROTOCOL.md §9.2.
 
 ---
 
@@ -757,9 +763,12 @@ whether it missed anything. Pub/sub would give fan-out and nothing else.
 Kafka or NATS can be useful **behind** this boundary, especially when the application
 already has a durable event backbone. They are not drop-in transports for the current
 wire cursor. Kafka offsets and ordering are per partition, while this protocol carries
-one globally ordered `<ms>-<seq>` cursor. A Kafka backplane would therefore need either
-one partition, limiting scale, or a cursor vector and a protocol change. That decision
-belongs before v1.0 rather than inside an adapter that pretends the models are identical.
+one globally ordered `<ms>-<seq>` cursor. That decision has now been made — PROTOCOL.md
+§2.4: **a cursor names one sequence, and partitioning is one scope per sequence.** A
+Kafka or NATS backplane may back a feed scope only where that scope maps onto a single
+partition; anything wider has no total order to name and needs an edge sequencer in front
+of it, which is a different design rather than a configuration of this one. A cursor
+vector was rejected (DECISIONS.md D22).
 
 Two consequences worth knowing.
 
@@ -782,11 +791,34 @@ and reports none at all once the stream is gone entirely. Delete the two keys to
 stream rebuilt under a name whose floor was deleted can no longer vouch for itself, and
 answers conservatively.
 
-**The default Redis stream is one shared retention and replay budget.** Replay is bounded
-before topic filtering, so a hot unrelated topic or tenant can make a quiet subscriber
-refetch even when few relevant events changed. That is safe but can become noisy. Large
-multi-tenant deployments should use separate hubs/keys per authorization scope today;
-partitioned backplanes are a pre-1.0 design item.
+**The default Redis stream is one shared retention and replay budget.** `maxLen` counts
+*everybody's* events, so a burst on one tenant evicts another tenant's history and turns
+their next reconnect into a refetch they did nothing to earn. Replay is bounded before
+topic filtering too, so a quiet subscriber pays a scan over a log that is mostly other
+people's events. Safe, and noisy.
+
+**Partition with `scope`.** One scope is one sequence: its own ids, its own `maxLen`, its
+own replay scan, its own mount path.
+
+```js
+const hub = createHub({
+  backplane: await createRedisBackplane({
+    redis: new Redis(url),
+    subscriber: new Redis(url),
+    scope: `tenant/${tenantId}`,   // → stream key aghoz:tenant/42:events
+    maxLen: 10_000,                 // now spent on this tenant alone
+  }),
+})
+```
+
+The cost is the rule that comes with it: **a cursor is only meaningful inside its scope.**
+Ids are wall-clock based, so a cursor from another scope lands inside this one's retained
+range as often as outside it, where it looks like an ordinary position — replayed from,
+reported clean, believed. Nothing can detect that. So mount each scope on its own path,
+stamp §5's `event-cursor` from the hub that owns that path, and never repoint a hub at a
+different scope behind a path clients already hold cursors for. Two backplanes on one
+stream key inside one process warn at startup, because both hubs then read every event on
+it and the scopes have silently stopped separating anything.
 
 ---
 
@@ -1149,24 +1181,58 @@ Proving it in a second language is v0.5.
   replay. It cannot live in the core, which performs no IO by enforced invariant, so it
   sits beside the backplane and restores through `core.append`.
 
-### Next — correctness at the edge
+### Correctness at the edge
 
-These are protocol-freeze gates, ahead of adding more client implementations:
+**Complete.** These were the protocol-freeze gates, and they were gates rather than
+features: each one is a rule the wire format has to carry, and the wire format freezes at
+v1.0. Three of the four turned out to need no bytes on the wire at all — which is the
+useful finding, because it means the client corpus can own them and a second client
+implementation inherits them for free.
 
-- **Define topic-set cutover.** A cursor describes the topics that produced it. When a
-  lazy component adds a new topic, an event for that topic can currently land before the
-  reconnect while an old topic advances the global cursor past it. Pin the interleaving
-  in the client corpus, then choose between per-topic cursors, a stable feed scope, or an
-  explicit invalidate-after-open contract. Until then, lazy topics refetch after opening.
-- **Make the publication boundary executable.** Ship an outbox/CDC integration guide and
-  example. Gap detection starts only after `publish` is accepted; documentation alone
-  cannot make a database commit and an event append atomic.
-- **Recover from handler failure.** The cursor intentionally advances before callbacks.
-  Cache adapters that parse or fold payloads should invalidate the affected query when a
-  callback fails rather than leave an advanced cursor over an unchanged projection.
-- **Choose the partition model.** The default Redis key is one sequence, retention budget
-  and replay scan for every topic. Specify tenant-scoped keys or a cursor vector before a
-  Kafka/NATS backplane promises partitioned scale.
+- ~~**Define topic-set cutover.**~~ — **Shipped** as `onCutover` (PROTOCOL.md §9.3,
+  DECISIONS.md D19). A cursor is a baseline for a topic only over the range that topic
+  was in the open set, and the client is the only party that can know it: the server sees
+  one request with one topic list and cannot tell a new topic from an old one. So the
+  client tracks coverage and reports the topics that opened without a baseline, *after*
+  the replacement stream is open — before it, the refetch has §5's window all over again,
+  one layer up. Per-topic cursors were rejected for the same reason as the cursor vector
+  below. The rule is a pure function of the client's own history, so it lives in
+  `coverage.ts` with no IO and **`conformance/client/vectors.json` owns it** — fourteen
+  vectors, the first group of a client corpus v0.5 was going to need anyway. Both obvious
+  wrong implementations were confirmed to fail it first: trusting the cursor for
+  everything fails 8 of 14, and reporting every unseen topic fails the page-load cases it
+  would flood. `@aghoz/react-query` invalidates on it, so "lazy topics refetch after
+  opening" stopped being an instruction to the application.
+- ~~**Make the publication boundary executable.**~~ — **Shipped** as
+  [docs/OUTBOX.md](./docs/OUTBOX.md) and
+  [examples/outbox-sqlite](./examples/outbox-sqlite) (DECISIONS.md D20). An API was
+  rejected: `publishTransactional(tx, ..)` needs a driver, which needs a dependency, and
+  the interesting part of an outbox is not the insert — it is the relay's ordering, its
+  at-least-once retry, and the alarm on the *age* of the oldest unsent row. The example is
+  ninety lines on `node:sqlite`, so it needs no database, and it is tested rather than
+  illustrated: the crash between commit and publish, the rollback that must publish
+  nothing, the failed publish that retries, the two ways a relay publishes a row twice.
+  §13.7 stays open on purpose — recording a pattern is not the same as closing a hole.
+- ~~**Recover from handler failure.**~~ — **Shipped** as `onHandlerError` (§9.2,
+  DECISIONS.md D21). The cursor advances before callbacks so one throwing component
+  cannot stall the shared stream, and the consequence had never been built: the event
+  that threw is *never delivered again*, so a failed parse is a projection permanently
+  behind by one, with nothing reporting it. Failures now carry their topic and id, and
+  `useTopicQueryData` invalidates and re-throws. It had a live instance: the adapter's
+  own gap test published `'x'.repeat(120)` as a payload, so every replayed event failed
+  `JSON.parse` and folded nothing — the test passed because two failures cancelled out.
+- ~~**Choose the partition model.**~~ — **Decided** as PROTOCOL.md §2.4 feed scopes, and
+  shipped as `@aghoz/redis`'s `scope` (DECISIONS.md D22). A cursor names a position in
+  exactly one sequence; a feed scope *is* one sequence; partitioning is a scope per
+  partition, each with its own mount, sequencer and retention budget. A cursor vector was
+  rejected: it turns the cursor from a string that sorts into a structure that has to be
+  merged, changing §2.1, §4.1's `Last-Event-ID`, §5's header and every cursor any
+  application has already stored — paid for by everyone, including the majority who will
+  never partition anything. The one thing that *is* enforceable is enforced: two
+  backplanes on one stream key in one process now warn, because both hubs read every
+  event on it and the scopes silently stop separating anything. A Kafka or NATS backplane
+  may back a scope only where that scope is one partition; anything wider needs an edge
+  sequencer, which is a different product.
 
 ### v0.5 — adapters in other languages
 
@@ -1308,11 +1374,18 @@ reach only the subscribers authorized for it.
   you write yourself.
 - [DECISIONS.md](./DECISIONS.md) — every significant decision with its evidence,
   including the two that were reversed by measurement.
+- [docs/OUTBOX.md](./docs/OUTBOX.md) — the publication boundary: why a commit and a
+  publish are not atomic, the outbox and CDC patterns that make them so, and what a
+  duplicate costs depending on how your payloads are shaped.
 - [conformance/](./conformance/) — the language-neutral vector corpus both the
   TypeScript and Rust implementations run.
+- [conformance/client/](./conformance/client/) — the subscriber corpus: the §9 rules a
+  server cannot check for you.
 - [conformance/http/](./conformance/http/) — the HTTP suite: the same contract applied to
   the layer each language rewrites, over a real socket.
 - [examples/express-react](./examples/express-react) — the end-to-end example app.
+- [examples/outbox-sqlite](./examples/outbox-sqlite) — the publication boundary as ninety
+  lines and nine tests, on `node:sqlite`.
 
 ---
 

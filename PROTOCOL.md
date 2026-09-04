@@ -88,6 +88,40 @@ why the Redis backplane can be the sequencer rather than merely the transport. A
 process and a Postgres sequence can issue it too, without changing the meaning of "newer
 than the cursor."
 
+### 2.4 Feed scope
+
+**A cursor names a position in exactly one sequence.** The set of events ordered by one
+sequence is a *feed scope*, and it is the unit of partitioning in this protocol.
+
+- A mount path MUST serve exactly one feed scope. Two sequences behind one path produce
+  cursors that name two different positions and are indistinguishable on the wire.
+- A client MUST NOT present a cursor obtained from one mount path to another. §5's
+  `event-cursor` header is scoped to the mount that stamped it.
+- An implementation that partitions — per tenant, per region, per shard — MUST do so by
+  running a scope per partition, each with its own mount path, its own history budget and
+  its own sequencer. `@aghoz/redis` spells this as one stream key per scope.
+- A partitioned log (Kafka, NATS with multiple streams) MAY back a feed scope only if
+  that scope maps onto exactly **one** partition. A scope spread over several partitions
+  has no total order to name, so it needs an edge sequencer in front of it, which is a
+  different design rather than a configuration of this one.
+
+The alternative — a **cursor vector**, one position per partition — was considered and
+rejected. It changes the cursor from a string that sorts into a structure that has to be
+merged, and every place a cursor appears would change with it: §2.1's comparison, §4.1's
+`Last-Event-ID` header (which the browser also sets from `EventSource`), §5's header,
+every stored cursor in every application. The gain is bounded — a scope per tenant
+already partitions the work — and the cost is paid by everyone, including the majority
+who will never partition anything.
+
+**A cursor from a foreign scope is not detectable.** Ids are wall-clock based (§2), so
+two scopes issue ids from the same numeric range and a stray cursor lands *inside* a
+scope's retained history as often as outside it. There it looks like an ordinary
+position: the hub replays from it and reports nothing, and the client believes it has a
+baseline it has never had. Two consequences an implementation cannot design away, only
+respect: a hub MUST NOT be reconfigured to a different scope behind a path clients
+already hold cursors for, and an application serving several scopes MUST stamp §5's
+header from the hub that owns the path it is stamping for.
+
 ---
 
 ## 3. Topics
@@ -531,26 +565,64 @@ application (§2.1 comparison). Control frames carry no id and MUST NOT update t
 
 The client MAY advance the cursor before invoking application handlers so one throwing
 handler cannot block every topic multiplexed on the connection. Consequently the cursor
-MUST NOT be described as an acknowledgement that handlers completed. A client or cache
-adapter that folds payloads into state SHOULD invalidate and read an authoritative
-snapshot when parsing or handling fails.
+MUST NOT be described as an acknowledgement that handlers completed.
 
-### 9.3 Topic-set changes
+A client that advances the cursor before handlers run MUST report a handler failure to
+the application together with the topic and id of the event that failed. The reason is
+the ordering above: the cursor is already past that event, no reconnect will replay it,
+and a failure reported without its topic cannot be recovered from — the application knows
+something threw and not what is now behind. A cache adapter that parses or folds payloads
+MUST invalidate the affected topic and read an authoritative snapshot when its parse or
+its update fails; leaving an advanced cursor over a projection that never took the update
+is silent staleness reached through the adapter instead of through the transport.
+
+A client MAY additionally surface the failure as an ordinary error, and `@aghoz/client`
+does, so adopting the topic-scoped signal is not a condition of seeing the failure at
+all.
+
+### 9.3 Topic-set changes and cutover
 
 There is no client-to-server channel, so a topic cannot be added to a live connection. On
 a topic-set change a client MUST close the connection and reopen it with the new set and
 its current cursor.
 
-This preserves the replay contract for topics already in the old set, but a global cursor
-does **not** establish a baseline for a newly added topic. An event for new topic `b` can
-be assigned id 11 while the old connection still carries only `a`; an `a` event with id
-12 can then advance the cursor before the replacement connection opens. Reconnecting for
-`a,b` from 12 cannot replay `b`'s id 11, and no history gap occurred.
+This preserves the replay contract for topics already in the old set, but a cursor does
+**not** establish a baseline for a newly added topic. An event for new topic `b` can be
+assigned id 11 while the old connection still carries only `a`; an `a` event with id 12
+can then advance the cursor before the replacement connection opens. Reconnecting for
+`a,b` from 12 cannot replay `b`'s id 11, and no history gap occurred — the hub is right
+that it lost nothing, and `b` is missing an event.
 
-An application that adds a topic lazily MUST therefore read or invalidate that topic's
-authoritative snapshot after the replacement stream opens, unless it already holds a
-baseline explicitly paired with a cursor that covers the new topic. A client MUST NOT
-present the global cursor alone as proof that a newly added topic is current.
+**Coverage.** A topic is covered by a cursor only over the range for which that topic was
+in the open topic set. Precisely, with `C` the cursor the client holds:
+
+- a topic in the currently open set is covered up to `C`;
+- a topic that has left an open set is covered up to the cursor at which it left, and is
+  covered now only if the cursor has not moved since;
+- a topic that has never been in an open set is covered up to the cursor the client
+  started from — its `initialCursor` (§5), or nothing at all if it had none.
+
+A topic whose coverage is any value other than `C` has no baseline, and the client is the
+only party that can know it: the server sees one request with one topic list and cannot
+tell a new topic from an old one, and the application sees a component mount rather than a
+cursor.
+
+**The cutover contract.** A client MUST expose a topic-scoped signal reporting the topics
+that opened without a baseline, and MUST report it **after** the replacement stream is
+open. Before it, a snapshot read in response has the window §5 describes all over again:
+anything published between the read and the open is lost with nothing reported. A client
+MUST NOT report a topic that was covered continuously — a signal that names the whole
+topic set on every reconnect costs a full refetch each time and will be switched off. A
+client MUST NOT present a cursor alone as proof that a newly added topic is current.
+
+A cache adapter MUST invalidate the reported topics. An application without one MUST read
+those topics' authoritative snapshots itself, unless it already holds a baseline paired
+with a cursor that covers them.
+
+Reporting is independent of §8: a cutover is not a gap, no history was truncated, and a
+connection may report both. An implementation MUST NOT suppress one because of the other.
+
+`conformance/client/vectors.json` pins this rule, including the interleaving above.
 
 Topic churn also costs a reconnect and a replay scan. Debouncing (§9.1) is what makes it
 acceptable. Clients SHOULD enforce a maximum topic count (64 by default) consistent with
@@ -609,6 +681,12 @@ on arrival.
 
 Implementations MUST agree byte-for-byte on the following. These are the seed of the
 shared corpus that the core, every binding, and the browser parser are all tested against.
+
+Two corpora carry it. `conformance/vectors.json` is the hub's: pure functions of the
+core, plus `conformance/http/scenarios.json` for the HTTP layer above it.
+`conformance/client/vectors.json` is the subscriber's, and exists because a server
+cannot check §9 for you — nothing on the wire distinguishes a client that reports a §9.3
+cutover from one that silently serves a topic it has no baseline for.
 
 **V1 — simple event**
 
@@ -681,11 +759,17 @@ Tracked here rather than in issues until v0.1 ships.
    detectable and no backplane is configured. A Redis Streams backplane ships; a Postgres
    `LISTEN`/`NOTIFY` one is planned, and will need its own sequencer since Postgres has no
    equivalent of `XADD`'s id.
-5. **Topic-set cutover.** §9.3 states the safe application rule for a lazily added topic,
-   but the client API does not yet make "replacement stream is open" a topic-scoped event.
-   Before the wire format freezes, decide whether an implementation-level guarantee needs
-   per-topic cursors, stable feed scopes, or an explicit ready/invalidate callback.
-6. **Partitioned backplanes.** One cursor currently names one total sequence. Kafka and
-   other partitioned logs order and offset each partition independently. Supporting them
-   without a single-partition bottleneck requires a cursor vector or an edge sequencer;
-   neither can be hidden inside an adapter without changing protocol semantics.
+5. ~~**Topic-set cutover.**~~ **Resolved** by §9.3's cutover contract: the client reports
+   the topics that opened without a baseline, after the replacement stream is open, and
+   `conformance/client/vectors.json` pins the rule. Per-topic cursors were rejected for
+   the same reason as the cursor vector in §2.4 — the cost lands on every cursor in the
+   protocol to serve the case where a topic mounts late, which one signal answers.
+6. ~~**Partitioned backplanes.**~~ **Resolved** by §2.4: a cursor names one sequence, a
+   feed scope is one sequence, and partitioning is a scope per partition rather than a
+   cursor vector. A partitioned log may back a scope only where the scope is one
+   partition; anything wider needs an edge sequencer, which is a different design.
+7. **The publication boundary.** §8's guarantees begin after `publish` is accepted, and a
+   database commit and an event append are not atomic. Nothing in this document can make
+   them so. `docs/OUTBOX.md` is the pattern that can, with a runnable version in
+   `examples/outbox-sqlite/`; this item stays open because the protocol still has nothing
+   to say about it, which is the honest position rather than a solved one.

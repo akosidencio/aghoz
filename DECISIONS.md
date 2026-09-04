@@ -5,6 +5,225 @@ Newest first.
 
 ---
 
+## D22 — Partitioning is a scope per sequence; the cursor stays one string
+
+**Date:** 4 September 2026 · **Status:** accepted
+
+### One key, one budget, everybody's events
+
+The Redis backplane's default is a single stream key. That is one sequence, which is
+correct and is the reason `XADD` can be the sequencer (§2.3) — and it is also one
+retention budget and one replay scan for every tenant in the deployment. The
+consequences only show up once the deployment is real:
+
+- `maxLen` is a count over *everybody's* events. A burst on one tenant evicts another
+  tenant's history, and that tenant's next reconnect is answered `earliest` — a refetch
+  they did nothing to earn, arriving as a thundering herd if the burst was large enough.
+- Every reconnect scans a log that is mostly other people's events, bounded by
+  `maxReplay`, which is a cap on *reading* rather than on the fraction that turns out to
+  be relevant.
+- Nothing separates tenants at the transport layer. Authorization still holds — every
+  subscriber asked for its topics and `authorize` ran — but the isolation is entirely in
+  that callback.
+
+The open item this closes (§13.6) was posed as a Kafka question, and that framing is what
+made it look hard. Kafka orders and offsets each partition independently, so a client's
+position in a partitioned log is a *vector* of offsets, not a point.
+
+### Rejected: a cursor vector
+
+A cursor stops being a string that sorts and becomes a structure that has to be merged,
+and every place a cursor appears changes with it: §2.1's comparison, §4.1's
+`Last-Event-ID` — which is also the header the browser's own `EventSource` sets — §5's
+`event-cursor`, and every cursor any application has already stored. The gain is bounded,
+because a scope per tenant already partitions the work that partitioning was for, and the
+cost is paid by everyone including the majority who will never partition anything.
+
+Per-topic cursors are the same proposal at a different granularity, and were rejected in
+D19 for the same reason.
+
+### Decision: a feed scope is one sequence, and it is the unit of partitioning
+
+PROTOCOL.md §2.4. A mount path serves exactly one feed scope; a scope has its own
+sequencer, its own history budget and its own mount; partitioning is a hub per scope.
+`@aghoz/redis` spells it as `scope`, which derives the stream key — the setting existed
+as `key` all along, and naming it for what choosing it *means* is most of the change.
+
+A partitioned log may back a scope only where that scope maps onto one partition.
+Anything wider has no total order to name and needs an edge sequencer in front of it,
+which is a different product rather than a configuration of this one. Writing that down
+is the point of the decision: it says what a future Kafka backplane may and may not
+promise, before someone builds one that promises the other thing.
+
+### What cannot be enforced, and is therefore stated
+
+Ids are wall-clock based, so two scopes issue ids from the same numeric range. A cursor
+from a foreign scope lands *inside* a scope's retained history as often as outside it,
+and there it looks like an ordinary position — replayed from, reported clean, believed.
+No implementation can detect it. So §2.4 states the two rules that keep it from
+happening: a hub is never repointed at a different scope behind a path clients hold
+cursors for, and an application serving several scopes stamps §5's header from the hub
+that owns the path.
+
+One thing *is* enforceable, and is enforced: two backplanes on one stream key inside one
+process now warn. Both hubs read every event on the key, so each fans the other's topics
+out to its own subscribers — the scopes stop separating anything, and nothing errors.
+
+---
+
+## D21 — A handler failure is reported with its topic, because the cursor is already past it
+
+**Date:** 4 September 2026 · **Status:** accepted
+
+### The cursor advances first, on purpose, and that has a second half
+
+§9.2 lets a client advance the cursor before invoking handlers, so one throwing component
+cannot stall every topic multiplexed onto the connection. That is the right trade and it
+was already documented. What was not built is its consequence: the event that threw is
+*never delivered again*. No reconnect replays it, because the cursor is past it. A parse
+failure is therefore not a logged error — it is a projection that is permanently behind
+by one event, with nothing anywhere reporting it.
+
+`@aghoz/react-query`'s `useTopicQueryData` was the live instance. It folds payloads into
+the cache, its default parse is `JSON.parse`, and a payload that failed to parse threw
+into the client's `onError` and left the cache untouched at an advanced cursor. The
+package's own documentation said applications "should invalidate there too", which is a
+correct instruction nobody follows — and the adapter is the one component that always
+knows which query the failed event belonged to.
+
+It was also masked in the test suite, which is how it stayed comfortable: the gap test
+published `'x'.repeat(120)` as its payload, so every replayed event failed to parse and
+silently folded nothing. The test passed because two failures cancelled out.
+
+### Decision: report failures by topic, and make the cache adapter invalidate
+
+`Client` gains `onHandlerError(error, meta)` — option and listener, the same shape as
+`onGap` — where `meta` carries the topic and the id. §9.2 now requires it as a MUST for
+any client that advances the cursor before handlers, and requires a folding cache adapter
+to invalidate on it.
+
+`useTopicQueryData` invalidates when its parse or its updater throws, then **re-throws**
+so the failure still reaches `onHandlerError` and `onError`. Invalidation is recovery,
+not suppression; a swallowed failure would trade silent staleness for a silent refetch
+loop, which is not obviously better and is much harder to see.
+
+`useTopicInvalidation` needs none of this and gets none of it. It ignores the payload
+entirely, so there is nothing in it that can fail — which is the strongest argument the
+library has for preferring it, and it is now written down where that choice is made.
+
+---
+
+## D20 — The publication boundary ships as an example, not as an API
+
+**Date:** 4 September 2026 · **Status:** accepted
+
+### The half of the story the library cannot own
+
+Everything §8 promises begins after `publish` is accepted. The window before it — the
+transaction, and the moment between committing it and telling the hub — is invisible to
+the hub, and an event lost there is lost with no gap, no error and no symptom: the stream
+stays open, the checkpoint stays clean, every subsequent event arrives, and the UI is
+confidently missing one order. It is discovered when somebody reloads the page and the
+number changes.
+
+The README had been saying "use an outbox" for as long as the project has existed. That
+sentence has never made anybody's commit atomic.
+
+### Rejected: an outbox API in the library
+
+`hub.publishTransactional(tx, ...)` needs a transaction object, which means a driver,
+which means either a dependency or an adapter per driver — against D2's zero-dependency
+rule, and against the premise that the hub is an object in *your* process using the
+database *you* already opened. It would also be the wrong shape: the interesting part of
+an outbox is not the insert, it is the relay's ordering, its at-least-once retry, and the
+alarm on the age of the oldest unsent row. None of that belongs to a push library.
+
+### Decision: `docs/OUTBOX.md` plus `examples/outbox-sqlite/`, with tests
+
+The guide states the two wrong answers and what each one costs — publish-after-commit
+loses events silently, publish-before-commit invents them unrecoverably — then the
+outbox, the three relay rules, CDC as the same boundary reached from the other side, and
+the operational half nobody writes down (alarm on *age*, not count; one relay; retention
+during a backlog).
+
+The example is ninety lines on `node:sqlite`, so it needs no database to run, and it is
+tested rather than illustrated: the crash between commit and publish, the rollback that
+must publish nothing, the failed publish that retries, the two ways a relay publishes a
+row twice, and the origin surviving the table so the writing tab still skips its own echo.
+The test named *"a crash between the commit and the publish loses nothing"* is the whole
+document in four lines.
+
+§13.7 stays **open**. The protocol still has nothing to say about this boundary, and
+recording a pattern is not the same as closing a hole.
+
+---
+
+## D19 — §9.3 gets a cutover contract: the client reports what its cursor cannot vouch for
+
+**Date:** 4 September 2026 · **Status:** accepted
+
+### A cursor is one sequence, and a topic set is not
+
+§9.3 has always described the interleaving: an event for a newly added topic `b` is
+assigned id 11 while the live connection carries only `a`; an `a` event with id 12
+advances the cursor; the replacement connection for `a,b` resumes from 12 and can never
+replay 11. No history was truncated, so no gap is reported — the hub is right that it
+lost nothing, and `b` is missing an event.
+
+What §9.3 did about it was tell the *application* to refetch. That is an instruction with
+no enforcement, no test and no signal to hang off: nothing in the client API made
+"the replacement stream is open" a topic-scoped event, so the correct application had to
+reimplement the client's own bookkeeping to know when to act. Predictably nobody did, and
+the failure is invisible when they don't.
+
+### Rejected: per-topic cursors
+
+The exact fix, and it makes the cursor a map. Every place a cursor appears would change:
+§2.1's comparison, §4.1's `Last-Event-ID` header, §5's `event-cursor`, every stored
+cursor in every application. Same objection as D22's cursor vector, at a different
+granularity, and here the thing being bought is narrower still — a baseline for a topic
+that mounted late, which one signal answers.
+
+### Rejected: a stable feed scope
+
+Fix the topic set at page load and forbid changing it. Correct, and it outlaws the lazily
+mounted subscription, which is the shape every component-oriented framework produces.
+The rule would be violated by the first `<Suspense>` boundary and the violation would be
+silent.
+
+### Decision: coverage is tracked in the client, and reported after the stream opens
+
+A topic is covered by a cursor only over the range for which it was in the open topic
+set. §9.3 now states that as a rule with three cases, and requires the client to expose
+the topics that opened without one — **after** the replacement stream is open, because a
+refetch issued before it has §5's window all over again, one layer up.
+
+Two bounds make it a signal rather than noise, and both are MUSTs. A topic covered
+continuously must not be reported, or every reconnect refetches everything and the signal
+gets switched off. And a topic that has never been in an open set inherits the client's
+initial cursor, so every component in a first render pass — including the ones that mount
+a tick late — shares the baseline the page's data was read at, and a first page load
+reports nothing.
+
+`Client.onCutover` and `SharedClient.onCutover` carry it; `@aghoz/react-query` invalidates
+on it, which turns "lazy topics refetch after opening" from documentation into the
+adapter's behaviour. In the multi-tab case the leader decides and broadcasts, because a
+follower does not know when the shared stream reopened or with what set — a tab that had
+nothing to do with the widening hears it too and refetches once, which is the right side
+to be wrong on.
+
+### The corpus this needed
+
+The rule is a pure function of the client's own history, so it lives in `coverage.ts`
+with no IO, and `conformance/client/vectors.json` owns it — the first group of a client
+corpus that v0.5's second client implementation was going to need anyway. Fourteen
+vectors, K3 being the interleaving above. Both deliberately broken implementations were
+confirmed to fail it before it was allowed to pass: the one that trusts the global cursor
+fails 8 of 14, and the one that fires for every unseen topic fails on the page-load cases
+it would flood.
+
+---
+
 ## D18 — The bounds that only held on the string path, and an ABI that admits it is unsafe
 
 **Date:** 4 September 2026 · **Status:** accepted

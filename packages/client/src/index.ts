@@ -19,9 +19,13 @@ export {
   type Handler,
   type EventMeta,
   type RequestHeaders,
+  type CutoverListener,
+  type HandlerErrorListener,
 } from './client.js'
 
 export { SseParser, compareIds, type ParsedEvent } from './parser.js'
+
+export { Coverage, createCoverage } from './coverage.js'
 
 export {
   SharedClient,

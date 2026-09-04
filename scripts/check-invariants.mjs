@@ -111,15 +111,23 @@ check('packages version in lockstep', () => {
 check('the protocol core performs no IO', () => {
   // hub.ts and registry.ts are what the corpus owns. Once they can touch a socket or
   // the clock, the corpus stops being able to pin their behaviour.
+  //
+  // coverage.ts is the client's equivalent — §9.3's rule, owned by the client corpus —
+  // and it is here for the same reason: a coverage decision that could read a clock
+  // would stop being reproducible from a vector.
   const offenders = []
-  for (const file of ['packages/server/src/hub.ts', 'packages/server/src/registry.ts']) {
+  for (const file of [
+    'packages/server/src/hub.ts',
+    'packages/server/src/registry.ts',
+    'packages/client/src/coverage.ts',
+  ]) {
     const source = read(file)
     for (const pattern of [/from 'node:/, /require\(/, /Date\.now\(/, /Math\.random\(/]) {
       if (pattern.test(source)) offenders.push(`${file} contains ${pattern}`)
     }
   }
   if (offenders.length > 0) throw new Error(offenders.join('; '))
-  return 'hub.ts and registry.ts are pure'
+  return 'hub.ts, registry.ts and coverage.ts are pure'
 })
 
 // ---------------------------------------------------------------------------
@@ -138,22 +146,31 @@ check('the client has no dependency on the server package', () => {
 check('every conformance vector carries a description', () => {
   // A vector whose failure message does not say what is wrong is worth very little at
   // three in the morning.
-  const corpus = json('conformance/vectors.json')
-  // Derived from the corpus rather than listed, because a hardcoded group list silently
-  // stops checking when a category is added — which is exactly what happened when
-  // §6.0's `origin` group arrived and eleven vectors went unchecked.
-  const groups = Object.keys(corpus).filter((k) => Array.isArray(corpus[k]))
+  //
+  // Both corpora, because there are two: the hub's and the client's. Listing one here
+  // would have left the other unchecked from the day it was added, which is the same
+  // mistake the group lists below already made once.
+  let total = 0
+  let groupCount = 0
   const missing = []
-  for (const group of groups) {
-    for (const vector of corpus[group]) {
-      if (typeof vector.desc !== 'string' || vector.desc.length < 8) {
-        missing.push(`${group}/${vector.id}`)
+  for (const path of ['conformance/vectors.json', 'conformance/client/vectors.json']) {
+    const corpus = json(path)
+    // Derived from the corpus rather than listed, because a hardcoded group list silently
+    // stops checking when a category is added — which is exactly what happened when
+    // §6.0's `origin` group arrived and eleven vectors went unchecked.
+    const groups = Object.keys(corpus).filter((k) => Array.isArray(corpus[k]))
+    for (const group of groups) {
+      for (const vector of corpus[group]) {
+        if (typeof vector.desc !== 'string' || vector.desc.length < 8) {
+          missing.push(`${path} ${group}/${vector.id}`)
+        }
       }
+      total += corpus[group].length
     }
+    groupCount += groups.length
   }
   if (missing.length > 0) throw new Error(`undescribed vectors: ${missing.join(', ')}`)
-  const total = groups.reduce((n, g) => n + corpus[g].length, 0)
-  return `${total} vectors across ${groups.length} groups`
+  return `${total} vectors across ${groupCount} groups, in two corpora`
 })
 
 // ---------------------------------------------------------------------------

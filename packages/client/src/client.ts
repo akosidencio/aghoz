@@ -7,6 +7,7 @@
  */
 
 import { SseParser, compareIds } from './parser.js'
+import { Coverage } from './coverage.js'
 
 export type GapReason = 'history-truncated' | 'slow-consumer'
 export type ClientState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed'
@@ -26,6 +27,20 @@ export interface EventMeta {
 }
 
 export type Handler = (data: string, meta: EventMeta) => void
+
+/**
+ * §9.3 — topics whose replacement stream just opened without a baseline.
+ *
+ * `cursor` is the position they were joined at, for an application that pairs its
+ * snapshots with cursors and can decide for itself whether a refetch is needed.
+ */
+export type CutoverListener = (topics: readonly string[], cursor: string | undefined) => void
+
+/**
+ * §9.2 — a subscriber callback threw, after the cursor had already advanced past the
+ * event that fed it.
+ */
+export type HandlerErrorListener = (error: unknown, meta: EventMeta) => void
 
 /**
  * Headers added to every stream attempt.
@@ -51,6 +66,25 @@ export interface ClientOptions {
   onGap?: (reason: GapReason, topics: readonly string[]) => void
   /** §4.3 — topics the server refused; the connection stayed open for the rest. */
   onDenied?: (topics: readonly string[]) => void
+  /**
+   * §9.3 — a topic was added to a live client and its stream has now reopened, but the
+   * cursor it resumed from was never a baseline for that topic.
+   *
+   * Fires after the replacement stream is open, so a refetch answering it cannot open
+   * a second window of its own. Read an authoritative snapshot for these topics; a
+   * cache adapter should invalidate them.
+   */
+  onCutover?: CutoverListener
+  /**
+   * §9.2 — a handler threw. The cursor has already advanced past that event and will
+   * not replay it, so state folded from payloads is now behind by one event with
+   * nothing else to report it.
+   *
+   * Also reached by a parse failure inside an adapter's handler, which is the common
+   * case. Invalidate the affected topic here; `onError` is the same failure without
+   * the topic, kept for logging.
+   */
+  onHandlerError?: HandlerErrorListener
   onError?: (error: unknown) => void
   onStateChange?: (state: ClientState) => void
   /**
@@ -106,6 +140,10 @@ export class Client {
    */
   readonly #gapListeners = new Set<(reason: GapReason, topics: readonly string[]) => void>()
   readonly #stateListeners = new Set<(state: ClientState) => void>()
+  readonly #cutoverListeners = new Set<CutoverListener>()
+  readonly #handlerErrorListeners = new Set<HandlerErrorListener>()
+  /** §9.3 — which topics the cursor can vouch for. Pure; see `coverage.ts`. */
+  readonly #coverage: Coverage
 
   #cursor: string | undefined
   #state: ClientState = 'idle'
@@ -124,6 +162,8 @@ export class Client {
       url: options.url,
       onGap: options.onGap ?? (() => {}),
       onDenied: options.onDenied ?? (() => {}),
+      onCutover: options.onCutover ?? (() => {}),
+      onHandlerError: options.onHandlerError ?? (() => {}),
       onError: options.onError ?? (() => {}),
       onStateChange: options.onStateChange ?? (() => {}),
       debounceMs: options.debounceMs ?? 10,
@@ -136,6 +176,7 @@ export class Client {
     }
     this.#originId = options.originId ?? randomOrigin()
     this.#cursor = options.initialCursor
+    this.#coverage = new Coverage(options.initialCursor)
   }
 
   get state(): ClientState {
@@ -203,6 +244,39 @@ export class Client {
     this.#gapListeners.add(listener)
     return () => {
       this.#gapListeners.delete(listener)
+    }
+  }
+
+  /**
+   * §9.3 — registers a cutover listener. Returns its unsubscribe function.
+   *
+   * Fires once per opened connection that carries a topic the cursor was never a
+   * baseline for, with those topics and the cursor they joined at. A cache adapter
+   * invalidates them; an application that pairs snapshots with cursors can compare.
+   *
+   * It cannot fire for the topics a client was constructed with: they all inherit the
+   * initial cursor, which is precisely the baseline the page's data was read at.
+   */
+  onCutover(listener: CutoverListener): () => void {
+    this.#cutoverListeners.add(listener)
+    return () => {
+      this.#cutoverListeners.delete(listener)
+    }
+  }
+
+  /**
+   * §9.2 — registers a handler-failure listener. Returns its unsubscribe function.
+   *
+   * The cursor advances before handlers run, on purpose: one throwing component must
+   * not stall every topic multiplexed onto the connection. The consequence is that a
+   * failed handler is a *silently* stale projection — the event will not come round
+   * again — so anything folding payloads into state needs this signal to invalidate
+   * with. `onError` sees the same failures without knowing which topic they were for.
+   */
+  onHandlerError(listener: HandlerErrorListener): () => void {
+    this.#handlerErrorListeners.add(listener)
+    return () => {
+      this.#handlerErrorListeners.delete(listener)
     }
   }
 
@@ -293,12 +367,18 @@ export class Client {
 
   async #sync(): Promise<void> {
     if (this.#closed) return
-    const key = this.#topics().join(',')
+    const topics = this.#topics()
+    const key = topics.join(',')
     if (key === this.#openTopicsKey && this.#abort !== undefined) return
 
     this.#abort?.abort()
     this.#abort = undefined
     this.#openTopicsKey = key
+
+    // §9.3 — decided before the connection is replaced, because the answer depends on
+    // the cursor the outgoing connection stopped at. Deciding it after the new stream
+    // opened would compare every topic against a cursor that had already moved on.
+    this.#coverage.sync(topics)
 
     if (key === '') {
       this.#setState('idle')
@@ -367,6 +447,10 @@ export class Client {
 
         this.#setState('open')
         this.#attempt = 0
+        // §9.3 — after the stream is open, never before. A refetch issued while no
+        // stream exists has the same window §5 describes, one layer up.
+        const cutover = this.#coverage.open(topics)
+        if (cutover.length > 0) this.#reportCutover(cutover)
         await this.#read(res, reportGap, topics)
       } catch (error) {
         if (controller.signal.aborted || this.#closed) return
@@ -437,6 +521,7 @@ export class Client {
           // registers the subscriber before snapshotting history.
           if (this.#cursor !== undefined && compareIds(event.id, this.#cursor) <= 0) continue
           this.#cursor = event.id
+          this.#coverage.advance(event.id)
 
           // §6.0 — our own write, coming back. The cursor advances first and on purpose:
           // skipping that too would make every skipped event replay on the next
@@ -454,8 +539,10 @@ export class Client {
             try {
               handler(event.data, meta)
             } catch (error) {
-              // One misbehaving component must not tear down the shared connection.
-              this.#options.onError(error)
+              // One misbehaving component must not tear down the shared connection —
+              // but the cursor is already past this event, so whoever folds payloads
+              // into state has to hear about it by topic. §9.2.
+              this.#reportHandlerError(error, meta)
             }
           }
         }
@@ -464,6 +551,33 @@ export class Client {
     } finally {
       reader.cancel().catch(() => {})
     }
+  }
+
+  /** Fans a cutover out to the option and every registered listener. */
+  #reportCutover(topics: readonly string[]): void {
+    this.#options.onCutover(topics, this.#cursor)
+    for (const listener of [...this.#cutoverListeners]) {
+      try {
+        listener(topics, this.#cursor)
+      } catch (error) {
+        this.#options.onError(error)
+      }
+    }
+  }
+
+  /** Fans a handler failure out to the option, every listener, and `onError`. */
+  #reportHandlerError(error: unknown, meta: EventMeta): void {
+    this.#options.onHandlerError(error, meta)
+    for (const listener of [...this.#handlerErrorListeners]) {
+      try {
+        listener(error, meta)
+      } catch (listenerError) {
+        this.#options.onError(listenerError)
+      }
+    }
+    // Still reported as a plain error, so existing logging keeps working and adopting
+    // the topic-scoped signal is not a condition of seeing the failure at all.
+    this.#options.onError(error)
   }
 
   #control(
