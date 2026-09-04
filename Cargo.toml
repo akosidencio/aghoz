@@ -16,8 +16,8 @@ edition = "2021"
 # Node binding needs; `aghoz-core` on its own builds back to 1.82.
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/thinkgrid-labs/aghoz"
-homepage = "https://github.com/thinkgrid-labs/aghoz#readme"
+repository = "https://github.com/akosidencio/aghoz"
+homepage = "https://github.com/akosidencio/aghoz#readme"
 authors = ["thinkgrid-labs"]
 # crates.io ranks on these; five keywords is the registry's hard cap.
 keywords = ["sse", "server-sent-events", "realtime", "push", "streaming"]

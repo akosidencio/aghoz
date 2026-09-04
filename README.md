@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/thinkgrid-labs/aghoz/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/thinkgrid-labs/aghoz/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/akosidencio/aghoz/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/akosidencio/aghoz/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#license"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg"></a>
   <img alt="Node.js 22 or later" src="https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg">
   <img alt="Zero third-party dependencies" src="https://img.shields.io/badge/third--party%20deps-0-brightgreen.svg">

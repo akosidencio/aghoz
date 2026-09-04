@@ -22,14 +22,14 @@
     "typescript",
     "cache"
   ],
-  "homepage": "https://github.com/thinkgrid-labs/aghoz#readme",
+  "homepage": "https://github.com/akosidencio/aghoz#readme",
   "bugs": {
-    "url": "https://github.com/thinkgrid-labs/aghoz/issues"
+    "url": "https://github.com/akosidencio/aghoz/issues"
   },
   "author": "thinkgrid-labs",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thinkgrid-labs/aghoz.git",
+    "url": "git+https://github.com/akosidencio/aghoz.git",
     "directory": "packages/react-query"
   },
   "license": "MIT OR Apache-2.0",
