@@ -1374,6 +1374,8 @@ reach only the subscribers authorized for it.
   you write yourself.
 - [DECISIONS.md](./DECISIONS.md) — every significant decision with its evidence,
   including the two that were reversed by measurement.
+- [CHANGELOG.md](./CHANGELOG.md) — what changed in each release, in lockstep across
+  every package.
 - [docs/OUTBOX.md](./docs/OUTBOX.md) — the publication boundary: why a commit and a
   publish are not atomic, the outbox and CDC patterns that make them so, and what a
   duplicate costs depending on how your payloads are shaped.

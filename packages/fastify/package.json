@@ -1,6 +1,6 @@
 {
   "name": "@aghoz/fastify",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Fastify adapter for Aghoz resumable edge event streams, mounted as a route inside your existing Fastify app.",
   "keywords": [
     "server-sent-events",

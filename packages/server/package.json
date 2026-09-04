@@ -1,6 +1,6 @@
 {
   "name": "@aghoz/server",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "In-process resumable edge event streams for Node.js and Express — mounts as a route so your existing auth runs first. Replay and explicit gaps, zero dependencies.",
   "keywords": [
     "server-sent-events",

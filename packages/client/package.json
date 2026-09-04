@@ -1,6 +1,6 @@
 {
   "name": "@aghoz/client",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Framework-agnostic browser client for the aghoz edge event-stream protocol. Built on fetch and ReadableStream for cursor resume, replay and explicit gaps. Zero dependencies.",
   "keywords": [
     "server-sent-events",
